@@ -44,3 +44,13 @@ training:
   ema: true
   ema_decay: 0.9999
   total_steps: 200000
+
+logging:
+  tracker: wandb
+  project: rama
+  entity: null
+  run_name: celeba256-sdvae-macro
+  log_every_steps: 100
+  sample_every_steps: 5000
+  checkpoint_every_steps: 10000
+  watch_model: false

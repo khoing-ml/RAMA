@@ -47,6 +47,7 @@ def main() -> None:
 
     vae_reconstruction = decode_latents(vae, z)
     macro_reconstruction = decode_latents(vae, decomposition.z_l_up)
+    zh_reconstruction = decode_latents(vae, decomposition.z_h)
     full_reconstruction = decode_latents(
         vae,
         reconstruct_from_decomposition(decomposition.z_l, decomposition.z_h),
@@ -54,6 +55,7 @@ def main() -> None:
 
     tensor_to_image(vae_reconstruction).save(out_dir / "vae_reconstruction.png")
     tensor_to_image(macro_reconstruction).save(out_dir / "macro_reconstruction.png")
+    tensor_to_image(zh_reconstruction).save(out_dir / "zh_reconstruction.png")
     tensor_to_image(full_reconstruction).save(out_dir / "full_decomposition_reconstruction.png")
 
     torch.save(

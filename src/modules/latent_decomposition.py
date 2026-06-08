@@ -21,6 +21,7 @@ def decompose_latent(z: torch.Tensor) -> LatentDecomposition:
     if z.shape[-2] % 2 != 0 or z.shape[-1] % 2 != 0:
         raise ValueError(f"latent spatial size must be even, got {tuple(z.shape[-2:])}")
 
+    ## this can be tested
     z_l = F.avg_pool2d(z, kernel_size=2, stride=2)
     z_l_up = F.interpolate(
         z_l,

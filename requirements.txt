@@ -1,5 +1,6 @@
 accelerate
 diffusers
+datasets
 huggingface_hub
 pillow
 pyyaml
@@ -8,4 +9,4 @@ torch
 torchvision
 tqdm
 transformers
-
+wandb

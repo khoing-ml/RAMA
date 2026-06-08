@@ -50,5 +50,28 @@ The script writes:
 
 - `vae_reconstruction.png`
 - `macro_reconstruction.png`
+- `zh_reconstruction.png`
 - `full_decomposition_reconstruction.png`
 - `latents.pt`
+
+## Macro Flow Training
+
+Cache SD-VAE latents before training:
+
+```bash
+python scripts/cache_sdvae_latents.py --images data/celeba256 --out data/latents --checkpoint checkpoints/sd-vae-ft-mse --store-components
+```
+
+Start a single-process training run:
+
+```bash
+python scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml
+```
+
+For multi-GPU training, launch through Accelerate:
+
+```bash
+accelerate launch scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml
+```
+
+The trainer reads the `logging.tracker: wandb` block from the config and logs loss, velocity norms, gradient norm, and learning rate to Weights & Biases.

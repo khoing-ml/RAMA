@@ -302,7 +302,17 @@ Decode only the upsampled macro latent:
 
 This shows how much image structure is kept in `z_L`.
 
-### 7.3 Full decomposition reconstruction
+### 7.3 Residual-only reconstruction
+
+Decode only the high-frequency residual latent:
+
+\[
+\hat{x}_{H} = D(z_H)
+\]
+
+This shows what the residual component contributes on its own.
+
+### 7.4 Full decomposition reconstruction
 
 Decode:
 
@@ -442,6 +452,16 @@ training:
   ema: true
   ema_decay: 0.9999
   total_steps: 200000 to 500000
+
+logging:
+  tracker: wandb
+  project: rama
+  entity: null
+  run_name: celeba256-sdvae-macro
+  log_every_steps: 100
+  sample_every_steps: 5000
+  checkpoint_every_steps: 10000
+  watch_model: false
 ```
 
 If memory allows, increase batch size:
@@ -606,7 +626,7 @@ Follow this order:
 3. Cache z latents.
 4. Verify VAE reconstruction D(z).
 5. Verify macro-only reconstruction D(U(z_L)).
-6. Train macro flow matching on z_L.
+6. Train macro flow matching on z_L with Weights & Biases logging enabled.
 7. Sample macro-only images.
 8. Add RAMA projection and quantization.
 9. Test quantization-only reconstruction.
