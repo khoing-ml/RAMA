@@ -1,0 +1,2 @@
+"""Latent-RAMA package."""
+

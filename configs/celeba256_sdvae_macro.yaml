@@ -1,0 +1,46 @@
+dataset:
+  name: celeba256
+  root: data/celeba256
+  image_size: 256
+  channels: 3
+  normalization: [-1, 1]
+
+vae:
+  checkpoint_id: stabilityai/sd-vae-ft-mse
+  local_checkpoint: checkpoints/sd-vae-ft-mse
+  cache_dir: .cache/huggingface
+  dtype: fp16
+  device: cuda
+
+latents:
+  output_dir: data/latents
+  cache_dtype: fp16
+  store_components: false
+
+decomposition:
+  macro_downsample_factor: 2
+  downsample_mode: avg_pool
+  upsample_mode: bilinear
+  align_corners: false
+
+macro_flow_model:
+  input_shape: [4, 16, 16]
+  base_channels: 128
+  channel_mult: [1, 2, 2]
+  num_res_blocks: 2
+  attention_resolutions: [8]
+  time_embedding_dim: 256
+  objective: rectified_flow
+
+training:
+  batch_size_per_gpu: 64
+  num_gpus: 2
+  global_batch_size: 128
+  gradient_accumulation_steps: 1
+  optimizer: AdamW
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-4
+  precision: fp16
+  ema: true
+  ema_decay: 0.9999
+  total_steps: 200000

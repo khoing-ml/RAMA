@@ -1,0 +1,11 @@
+accelerate
+diffusers
+huggingface_hub
+pillow
+pyyaml
+safetensors
+torch
+torchvision
+tqdm
+transformers
+
