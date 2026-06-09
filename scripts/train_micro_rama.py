@@ -230,6 +230,7 @@ def main() -> None:
         micro_type = "continuous"
     if micro_type not in {"categorical", "continuous"}:
         raise ValueError(f"unsupported micro type: {micro_type}")
+    config["micro_type"] = micro_type
 
     tokenizer = load_tokenizer(tokenizer_cfg, args.tokenizer_config) if micro_type == "categorical" else None
     context_encoder = build_context_encoder(config.get("context_encoder", {}))

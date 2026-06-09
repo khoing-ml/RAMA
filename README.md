@@ -115,6 +115,18 @@ python scripts/train_micro_rama.py --config configs/celeba256_sdvae_micro.yaml
 
 The trainer creates frozen orthogonal RAMA bases at `cache/rama_bases_p256_d16.pt` if they do not already exist. The `evaluation` block enables periodic real-`z_L` micro FID during training and logs it as `eval/fid_micro_real_zL`.
 
+The default config trains the discrete categorical RAMA variant. To match the continuous spline-flow form in the localized RAMA algorithm, train with:
+
+```bash
+python scripts/train_micro_rama.py --config configs/celeba256_sdvae_micro.yaml --micro-type continuous
+```
+
+Full-model sampling now supports both variants. It auto-detects the micro checkpoint type from config, or you can force it:
+
+```bash
+python scripts/sample_full_model.py --macro-checkpoint outputs/macro_flow/checkpoints/step_00200000.pt --micro-checkpoint outputs/micro_rama/checkpoints/step_00200000.pt --micro-type continuous --noise-scale 1.0
+```
+
 For a local smoke test, create synthetic full latents:
 
 ```bash

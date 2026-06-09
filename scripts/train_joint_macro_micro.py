@@ -37,7 +37,7 @@ from src.modules.ema import EMA
 from src.modules.flow_matching import flow_matching_loss
 from src.modules.latent_decomposition import reconstruct_from_decomposition
 from src.modules.latent_dataset import CachedMicroLatentDataset
-from src.modules.micro_rama import build_context_encoder, build_micro_rama_net
+from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import patchify, unpatchify
 from src.modules.unet_flow import build_unet_flow
 from src.modules.vae_utils import decode_latents, load_sd_vae
@@ -77,6 +77,7 @@ def evaluate_full_fid(
     fid_model: InceptionFID,
     projector: RAMAProjector,
     tokenizer,
+    micro_type: str,
     num_samples: int,
     batch_size: int,
     sampler: str,
@@ -87,6 +88,7 @@ def evaluate_full_fid(
     latent_width: int,
     temperature: float,
     use_argmax: bool,
+    noise_scale: float,
     device: torch.device,
 ) -> float:
     macro_was_training = macro_model.training
@@ -116,12 +118,33 @@ def evaluate_full_fid(
         shape = (current_batch, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
         z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
         z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
-        context = context_encoder(z_l)
-        logits = micro_model(context)
-        tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
-        y_hat = tokenizer.dequantize(tokens)
-        patches_hat = projector.inverse(y_hat)
-        z_h_hat = unpatchify(patches_hat, channels=latent_channels, height=latent_height, width=latent_width, patch_size=patch_size)
+        if micro_type == "categorical":
+            if tokenizer is None:
+                raise RuntimeError("categorical full FID requires a RAMATokenizer")
+            context = context_encoder(z_l)
+            logits = micro_model(context)
+            tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+            y_hat = tokenizer.dequantize(tokens)
+            patches_hat = projector.inverse(y_hat)
+            z_h_hat = unpatchify(
+                patches_hat,
+                channels=latent_channels,
+                height=latent_height,
+                width=latent_width,
+                patch_size=patch_size,
+            )
+        else:
+            z_h_hat = sample_micro_latent(
+                z_l,
+                context_encoder,
+                micro_model,
+                projector.bases,
+                latent_channels=latent_channels,
+                latent_height=latent_height,
+                latent_width=latent_width,
+                patch_size=patch_size,
+                noise_scale=noise_scale,
+            )
         z_hat = z_l_up + z_h_hat
         fake_batches.append(fid_model(decode_latents(vae, z_hat)))
         remaining -= current_batch
@@ -143,6 +166,7 @@ def sample_and_save(
     vae: torch.nn.Module,
     projector: RAMAProjector,
     tokenizer,
+    micro_type: str,
     samples_dir: Path,
     joint_step: int,
     num_samples: int,
@@ -154,6 +178,7 @@ def sample_and_save(
     latent_width: int,
     temperature: float,
     use_argmax: bool,
+    noise_scale: float,
     device: torch.device,
 ) -> None:
     macro_was_training = macro_model.training
@@ -166,12 +191,33 @@ def sample_and_save(
     shape = (num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
     z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
     z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
-    context = context_encoder(z_l)
-    logits = micro_model(context)
-    tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
-    y_hat = tokenizer.dequantize(tokens)
-    patches_hat = projector.inverse(y_hat)
-    z_h_hat = unpatchify(patches_hat, channels=latent_channels, height=latent_height, width=latent_width, patch_size=patch_size)
+    if micro_type == "categorical":
+        if tokenizer is None:
+            raise RuntimeError("categorical sampling requires a RAMATokenizer")
+        context = context_encoder(z_l)
+        logits = micro_model(context)
+        tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+        y_hat = tokenizer.dequantize(tokens)
+        patches_hat = projector.inverse(y_hat)
+        z_h_hat = unpatchify(
+            patches_hat,
+            channels=latent_channels,
+            height=latent_height,
+            width=latent_width,
+            patch_size=patch_size,
+        )
+    else:
+        z_h_hat = sample_micro_latent(
+            z_l,
+            context_encoder,
+            micro_model,
+            projector.bases,
+            latent_channels=latent_channels,
+            latent_height=latent_height,
+            latent_width=latent_width,
+            patch_size=patch_size,
+            noise_scale=noise_scale,
+        )
     z_hat = z_l_up + z_h_hat
 
     macro_images = decode_latents(vae, z_l_up)
@@ -227,6 +273,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-steps", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--sample-argmax", action="store_true")
+    parser.add_argument("--noise-scale", type=float, default=1.0, help="Gaussian base-noise scale for continuous micro RAMA.")
     parser.add_argument("--samples-dir", default="outputs/samples")
     parser.add_argument("--disable-wandb", action="store_true")
     return parser.parse_args()
@@ -314,6 +361,7 @@ def main() -> None:
         micro_type = "continuous"
     if micro_type not in {"categorical", "continuous"}:
         raise ValueError(f"unsupported micro type: {micro_type}")
+    micro_config["micro_type"] = micro_type
 
     tokenizer = load_tokenizer(micro_config.get("tokenizer", {}), args.tokenizer_config) if micro_type == "categorical" else None
     context_encoder = build_context_encoder(micro_config.get("context_encoder", {}))
@@ -398,6 +446,7 @@ def main() -> None:
     fid_sampler_steps = args.sample_steps
     fid_temperature = args.temperature
     fid_use_argmax = args.sample_argmax or bool(micro_eval.get("use_argmax", False))
+    fid_noise_scale = float(micro_eval.get("noise_scale", args.noise_scale))
     macro_full_latent_size = int(macro_eval.get("full_latent_size", 32))
     samples_dir = Path(args.samples_dir)
     macro_grad_clip = float(macro_training.get("grad_clip", 1.0))
@@ -561,6 +610,7 @@ def main() -> None:
                     fid_model,
                     projector,
                     tokenizer,
+                    micro_type,
                     num_samples=min(fid_num_samples, len(dataset)),
                     batch_size=fid_batch_size,
                     sampler=fid_sampler,
@@ -571,6 +621,7 @@ def main() -> None:
                     latent_width=latent_width,
                     temperature=fid_temperature,
                     use_argmax=fid_use_argmax,
+                    noise_scale=fid_noise_scale,
                     device=accelerator.device,
                 )
                 if backup is not None:
@@ -595,6 +646,7 @@ def main() -> None:
                     vae,
                     projector,
                     tokenizer,
+                    micro_type,
                     samples_dir,
                     joint_step,
                     num_samples=num_samples,
@@ -606,6 +658,7 @@ def main() -> None:
                     latent_width=latent_width,
                     temperature=fid_temperature,
                     use_argmax=fid_use_argmax,
+                    noise_scale=fid_noise_scale,
                     device=accelerator.device,
                 )
                 if tracker == "wandb":

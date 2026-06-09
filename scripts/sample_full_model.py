@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.flow.sampler import sample_macro_latents
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.modules.ema import EMA
-from src.modules.micro_rama import build_context_encoder
+from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import unpatchify
 from src.modules.unet_flow import build_unet_flow
 from src.modules.vae_utils import decode_latents, load_sd_vae
@@ -34,7 +34,7 @@ def resolve_vae_checkpoint(vae_cfg: dict[str, object], override: str | None) -> 
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sample full images from macro flow plus categorical micro RAMA.")
+    parser = argparse.ArgumentParser(description="Sample full images from macro flow plus micro RAMA.")
     parser.add_argument("--macro-checkpoint", required=True)
     parser.add_argument("--micro-checkpoint", required=True)
     parser.add_argument("--macro-config", default=None)
@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--use-argmax", action="store_true")
+    parser.add_argument("--micro-type", choices=("auto", "categorical", "continuous"), default="auto")
+    parser.add_argument("--noise-scale", type=float, default=1.0, help="Gaussian base-noise scale for continuous micro RAMA.")
     parser.add_argument("--vae-checkpoint", default=None)
     parser.add_argument("--cache-dir", default=".cache/huggingface")
     parser.add_argument("--dtype", default="fp16", choices=("fp16", "bf16", "fp32"))
@@ -84,6 +86,30 @@ def resolve_patch_size(config: dict[str, object]) -> int:
             rama_cfg.get("patch_size", micro_cfg.get("patch_size", 2)),
         )
     )
+
+
+def resolve_micro_type(config: dict[str, object], override: str) -> str:
+    if override != "auto":
+        return override
+    if "micro_type" in config:
+        micro_type = str(config["micro_type"])
+        if micro_type == "conditional_rq_nsf" or micro_type == "nflows":
+            micro_type = "continuous"
+        if micro_type not in {"categorical", "continuous"}:
+            raise ValueError(f"unsupported micro type: {micro_type}")
+        return micro_type
+    micro_cfg = config.get("micro", {})
+    micro_rama_cfg = config.get("micro_rama_net", {})
+    micro_type = str(micro_cfg.get("type", micro_rama_cfg.get("type", "categorical")))
+    if micro_type == "conditional_rq_nsf":
+        micro_type = "continuous"
+    if micro_type == "nflows":
+        micro_type = "continuous"
+    if bool(config.get("micro_continuous", {}).get("enabled", False)):
+        micro_type = "continuous"
+    if micro_type not in {"categorical", "continuous"}:
+        raise ValueError(f"unsupported micro type: {micro_type}")
+    return micro_type
 
 
 def resolve_residual_shape(
@@ -134,10 +160,17 @@ def main() -> None:
         ema.copy_to(macro_model)
     macro_model.eval()
 
-    tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config))
+    micro_type = resolve_micro_type(micro_config, args.micro_type)
+    tokenizer = None
+    if micro_type == "categorical":
+        tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config))
     context_encoder = build_context_encoder(micro_config.get("context_encoder", {})).to(args.device)
-    micro_cfg = micro_config.get("micro", micro_config.get("micro_rama_net", {}))
-    micro_model = build_categorical_micro_rama_net(micro_cfg, num_bins=tokenizer.num_bins).to(args.device)
+    if micro_type == "categorical":
+        micro_cfg = micro_config.get("micro", micro_config.get("micro_rama_net", {}))
+        micro_model = build_categorical_micro_rama_net(micro_cfg, num_bins=tokenizer.num_bins).to(args.device)
+    else:
+        micro_cfg = micro_config.get("micro_continuous", micro_config.get("micro_rama_net", {}))
+        micro_model = build_micro_rama_net(micro_cfg).to(args.device)
     context_encoder.load_state_dict(micro_checkpoint["context_encoder"])
     micro_model.load_state_dict(micro_checkpoint["micro_model"])
     context_encoder.eval()
@@ -158,18 +191,33 @@ def main() -> None:
     shape = (args.num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
     z_l = sample_macro_latents(macro_model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
     z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
-    context = context_encoder(z_l)
-    logits = micro_model(context)
-    tokens = sample_tokens(logits, temperature=args.temperature, use_argmax=args.use_argmax)
-    y_hat = tokenizer.dequantize(tokens)
-    patches_hat = projector.inverse(y_hat)
-    z_h_hat = unpatchify(
-        patches_hat,
-        channels=latent_channels,
-        height=latent_height,
-        width=latent_width,
-        patch_size=patch_size,
-    )
+    if micro_type == "categorical":
+        if tokenizer is None:
+            raise RuntimeError("categorical micro sampling requires a tokenizer")
+        context = context_encoder(z_l)
+        logits = micro_model(context)
+        tokens = sample_tokens(logits, temperature=args.temperature, use_argmax=args.use_argmax)
+        y_hat = tokenizer.dequantize(tokens)
+        patches_hat = projector.inverse(y_hat)
+        z_h_hat = unpatchify(
+            patches_hat,
+            channels=latent_channels,
+            height=latent_height,
+            width=latent_width,
+            patch_size=patch_size,
+        )
+    else:
+        z_h_hat = sample_micro_latent(
+            z_l,
+            context_encoder,
+            micro_model,
+            projector.bases,
+            latent_channels=latent_channels,
+            latent_height=latent_height,
+            latent_width=latent_width,
+            patch_size=patch_size,
+            noise_scale=args.noise_scale,
+        )
     z_hat = z_l_up + z_h_hat
 
     vae_cfg = macro_config.get("vae", {})
