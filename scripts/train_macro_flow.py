@@ -267,35 +267,39 @@ def main() -> None:
                 accelerator.log(logs, step=step)
                 accelerator.print(f"step={step} loss={logs['train/loss']:.6f} grad_norm={logs['train/grad_norm']:.4f}")
 
-            if accelerator.is_main_process and fid_every > 0 and step % fid_every == 0:
-                eval_model = accelerator.unwrap_model(model)
-                backup = None
-                if ema is not None:
-                    backup = {
-                        name: parameter.detach().clone()
-                        for name, parameter in eval_model.named_parameters()
-                        if parameter.requires_grad
-                    }
-                    ema.copy_to(eval_model)
-                fid = evaluate_macro_fid(
-                    eval_model,
-                    dataset,
-                    vae,
-                    fid_model,
-                    num_samples=min(fid_num_samples, len(dataset)),
-                    batch_size=fid_batch_size,
-                    sampler=fid_sampler,
-                    sampler_steps=fid_sampler_steps,
-                    full_latent_size=full_latent_size,
-                    device=accelerator.device,
-                )
-                if backup is not None:
-                    for name, parameter in eval_model.named_parameters():
-                        if name in backup:
-                            parameter.copy_(backup[name])
-                accelerator.log({"eval/fid_macro": fid}, step=step)
-                accelerator.print(f"step={step} fid_macro={fid:.4f}")
-                model.train()
+            if fid_every > 0 and step % fid_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    eval_model = accelerator.unwrap_model(model)
+                    backup = None
+                    if ema is not None:
+                        backup = {
+                            name: parameter.detach().clone()
+                            for name, parameter in eval_model.named_parameters()
+                            if parameter.requires_grad
+                        }
+                        ema.copy_to(eval_model)
+                    fid = evaluate_macro_fid(
+                        eval_model,
+                        dataset,
+                        vae,
+                        fid_model,
+                        num_samples=min(fid_num_samples, len(dataset)),
+                        batch_size=fid_batch_size,
+                        sampler=fid_sampler,
+                        sampler_steps=fid_sampler_steps,
+                        full_latent_size=full_latent_size,
+                        device=accelerator.device,
+                    )
+                    if backup is not None:
+                        with torch.no_grad():
+                            for name, parameter in eval_model.named_parameters():
+                                if name in backup:
+                                    parameter.copy_(backup[name])
+                    accelerator.log({"eval/fid_macro": fid}, step=step)
+                    accelerator.print(f"step={step} fid_macro={fid:.4f}")
+                    model.train()
+                accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and step % checkpoint_every == 0:
                 save_checkpoint(

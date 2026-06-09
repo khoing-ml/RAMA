@@ -292,36 +292,40 @@ def main() -> None:
                     f"grad_norm={logs['macro/train/grad_norm']:.4f}"
                 )
 
-            if accelerator.is_main_process and macro_fid_every > 0 and macro_step % macro_fid_every == 0:
-                current_step = max(macro_step, micro_step)
-                eval_model = accelerator.unwrap_model(macro_model)
-                backup = None
-                if macro_ema is not None:
-                    backup = {
-                        name: parameter.detach().clone()
-                        for name, parameter in eval_model.named_parameters()
-                        if parameter.requires_grad
-                    }
-                    macro_ema.copy_to(eval_model)
-                fid = evaluate_macro_fid(
-                    eval_model,
-                    dataset,
-                    vae,
-                    fid_model,
-                    num_samples=min(macro_fid_num_samples, len(dataset)),
-                    batch_size=macro_fid_batch_size,
-                    sampler=macro_fid_sampler,
-                    sampler_steps=macro_fid_sampler_steps,
-                    full_latent_size=macro_full_latent_size,
-                    device=accelerator.device,
-                )
-                if backup is not None:
-                    for name, parameter in eval_model.named_parameters():
-                        if name in backup:
-                            parameter.copy_(backup[name])
-                accelerator.log({"macro/eval/fid_macro": fid}, step=current_step)
-                accelerator.print(f"macro_step={macro_step} fid_macro={fid:.4f}")
-                macro_model.train()
+            if macro_fid_every > 0 and macro_step % macro_fid_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    current_step = max(macro_step, micro_step)
+                    eval_model = accelerator.unwrap_model(macro_model)
+                    backup = None
+                    if macro_ema is not None:
+                        backup = {
+                            name: parameter.detach().clone()
+                            for name, parameter in eval_model.named_parameters()
+                            if parameter.requires_grad
+                        }
+                        macro_ema.copy_to(eval_model)
+                    fid = evaluate_macro_fid(
+                        eval_model,
+                        dataset,
+                        vae,
+                        fid_model,
+                        num_samples=min(macro_fid_num_samples, len(dataset)),
+                        batch_size=macro_fid_batch_size,
+                        sampler=macro_fid_sampler,
+                        sampler_steps=macro_fid_sampler_steps,
+                        full_latent_size=macro_full_latent_size,
+                        device=accelerator.device,
+                    )
+                    if backup is not None:
+                        with torch.no_grad():
+                            for name, parameter in eval_model.named_parameters():
+                                if name in backup:
+                                    parameter.copy_(backup[name])
+                    accelerator.log({"macro/eval/fid_macro": fid}, step=current_step)
+                    accelerator.print(f"macro_step={macro_step} fid_macro={fid:.4f}")
+                    macro_model.train()
+                accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and macro_step % checkpoint_every == 0:
                 save_macro_checkpoint(
@@ -391,28 +395,31 @@ def main() -> None:
                     message += f" logabsdet_mean={logs['micro/train/logabsdet_mean']:.4f}"
                 accelerator.print(message)
 
-            if accelerator.is_main_process and micro_fid_every > 0 and micro_step % micro_fid_every == 0:
-                current_step = max(macro_step, micro_step)
-                fid = evaluate_micro_fid(
-                    accelerator.unwrap_model(context_encoder),
-                    accelerator.unwrap_model(micro_model),
-                    dataset,
-                    vae,
-                    fid_model,
-                    projector,
-                    tokenizer,
-                    micro_type,
-                    num_samples=min(micro_fid_num_samples, len(dataset)),
-                    batch_size=micro_fid_batch_size,
-                    patch_size=patch_size,
-                    temperature=micro_fid_temperature,
-                    use_argmax=micro_fid_use_argmax,
-                    device=accelerator.device,
-                )
-                accelerator.log({"micro/eval/fid_micro_real_zL": fid}, step=current_step)
-                accelerator.print(f"micro_step={micro_step} fid_micro_real_zL={fid:.4f}")
-                context_encoder.train()
-                micro_model.train()
+            if micro_fid_every > 0 and micro_step % micro_fid_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    current_step = max(macro_step, micro_step)
+                    fid = evaluate_micro_fid(
+                        accelerator.unwrap_model(context_encoder),
+                        accelerator.unwrap_model(micro_model),
+                        dataset,
+                        vae,
+                        fid_model,
+                        projector,
+                        tokenizer,
+                        micro_type,
+                        num_samples=min(micro_fid_num_samples, len(dataset)),
+                        batch_size=micro_fid_batch_size,
+                        patch_size=patch_size,
+                        temperature=micro_fid_temperature,
+                        use_argmax=micro_fid_use_argmax,
+                        device=accelerator.device,
+                    )
+                    accelerator.log({"micro/eval/fid_micro_real_zL": fid}, step=current_step)
+                    accelerator.print(f"micro_step={micro_step} fid_micro_real_zL={fid:.4f}")
+                    context_encoder.train()
+                    micro_model.train()
+                accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and micro_step % checkpoint_every == 0:
                 save_micro_checkpoint(

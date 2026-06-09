@@ -21,6 +21,8 @@ class EMA:
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
                 continue
+            if self.shadow[name].device != parameter.device or self.shadow[name].dtype != parameter.dtype:
+                self.shadow[name] = self.shadow[name].to(device=parameter.device, dtype=parameter.dtype)
             self.shadow[name].mul_(self.decay).add_(parameter.detach(), alpha=1.0 - self.decay)
 
     def state_dict(self) -> dict[str, object]:

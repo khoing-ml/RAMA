@@ -357,27 +357,30 @@ def main() -> None:
                     message += f" logabsdet_mean={logs['train/logabsdet_mean']:.4f}"
                 accelerator.print(message)
 
-            if accelerator.is_main_process and fid_every > 0 and step % fid_every == 0:
-                fid = evaluate_micro_fid(
-                    accelerator.unwrap_model(context_encoder),
-                    accelerator.unwrap_model(micro_model),
-                    dataset,
-                    vae,
-                    fid_model,
-                    projector,
-                    tokenizer,
-                    micro_type,
-                    num_samples=min(fid_num_samples, len(dataset)),
-                    batch_size=fid_batch_size,
-                    patch_size=patch_size,
-                    temperature=fid_temperature,
-                    use_argmax=fid_use_argmax,
-                    device=accelerator.device,
-                )
-                accelerator.log({"eval/fid_micro_real_zL": fid}, step=step)
-                accelerator.print(f"step={step} fid_micro_real_zL={fid:.4f}")
-                context_encoder.train()
-                micro_model.train()
+            if fid_every > 0 and step % fid_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    fid = evaluate_micro_fid(
+                        accelerator.unwrap_model(context_encoder),
+                        accelerator.unwrap_model(micro_model),
+                        dataset,
+                        vae,
+                        fid_model,
+                        projector,
+                        tokenizer,
+                        micro_type,
+                        num_samples=min(fid_num_samples, len(dataset)),
+                        batch_size=fid_batch_size,
+                        patch_size=patch_size,
+                        temperature=fid_temperature,
+                        use_argmax=fid_use_argmax,
+                        device=accelerator.device,
+                    )
+                    accelerator.log({"eval/fid_micro_real_zL": fid}, step=step)
+                    accelerator.print(f"step={step} fid_micro_real_zL={fid:.4f}")
+                    context_encoder.train()
+                    micro_model.train()
+                accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and step % checkpoint_every == 0:
                 save_checkpoint(
