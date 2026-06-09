@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer-config", default="cache/rama_tokenizer_config.pt")
     parser.add_argument("--out", default="outputs/full_samples/generated_zL_macro_plus_micro.png")
     parser.add_argument("--macro-out", default="outputs/full_samples/generated_zL_macro_only.png")
+    parser.add_argument("--micro-out", default="outputs/full_samples/generated_zL_micro_only.png")
+    parser.add_argument("--comparison-out", default="outputs/full_samples/generated_zL_macro_micro_full.png")
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--sampler", choices=("heun", "euler"), default="heun")
     parser.add_argument("--steps", type=int, default=50)
@@ -72,6 +74,51 @@ def sample_tokens(logits: torch.Tensor, temperature: float, use_argmax: bool) ->
     return torch.multinomial(flat, num_samples=1).reshape(logits.shape[:-1])
 
 
+def resolve_patch_size(config: dict[str, object]) -> int:
+    micro_latent_cfg = config.get("micro_latent", {})
+    rama_cfg = config.get("rama", {})
+    micro_cfg = config.get("micro", config.get("micro_rama_net", {}))
+    return int(
+        micro_latent_cfg.get(
+            "patch_size",
+            rama_cfg.get("patch_size", micro_cfg.get("patch_size", 2)),
+        )
+    )
+
+
+def resolve_residual_shape(
+    macro_model: torch.nn.Module,
+    macro_config: dict[str, object],
+    micro_config: dict[str, object],
+    patch_size: int,
+    projector: RAMAProjector,
+) -> tuple[int, int, int]:
+    micro_latent_cfg = micro_config.get("micro_latent", {})
+    residual_shape = micro_latent_cfg.get("residual_shape")
+    if residual_shape is not None:
+        channels, height, width = (int(value) for value in residual_shape)
+    else:
+        full_latent_size = int(
+            macro_config.get("evaluation", {}).get(
+                "full_latent_size",
+                int(macro_model.resolution) * int(macro_config.get("decomposition", {}).get("macro_downsample_factor", 2)),
+            )
+        )
+        channels = int(getattr(macro_model, "in_channels"))
+        height = full_latent_size
+        width = full_latent_size
+
+    if height % patch_size != 0 or width % patch_size != 0:
+        raise ValueError(f"residual latent shape {height}x{width} must divide by patch_size={patch_size}")
+    expected_patches = (height // patch_size) * (width // patch_size)
+    if projector.num_patches != expected_patches:
+        raise ValueError(f"RAMA bases have {projector.num_patches} patches, expected {expected_patches} for {height}x{width}")
+    expected_patch_dim = channels * patch_size * patch_size
+    if projector.patch_dim != expected_patch_dim:
+        raise ValueError(f"RAMA bases patch_dim={projector.patch_dim}, expected {expected_patch_dim}")
+    return channels, height, width
+
+
 def main() -> None:
     args = parse_args()
     macro_checkpoint = torch.load(args.macro_checkpoint, map_location="cpu")
@@ -99,33 +146,57 @@ def main() -> None:
     bases = torch.load(args.bases, map_location="cpu").float()
     projector = RAMAProjector(bases).to(args.device)
     projector.requires_grad_(False)
+    patch_size = resolve_patch_size(micro_config)
+    latent_channels, latent_height, latent_width = resolve_residual_shape(
+        macro_model,
+        macro_config,
+        micro_config,
+        patch_size,
+        projector,
+    )
 
     shape = (args.num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
     z_l = sample_macro_latents(macro_model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
-    z_l_up = F.interpolate(z_l, size=(32, 32), mode="bilinear", align_corners=False)
+    z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
     context = context_encoder(z_l)
     logits = micro_model(context)
     tokens = sample_tokens(logits, temperature=args.temperature, use_argmax=args.use_argmax)
     y_hat = tokenizer.dequantize(tokens)
     patches_hat = projector.inverse(y_hat)
-    z_h_hat = unpatchify(patches_hat, channels=4, height=32, width=32, patch_size=2)
+    z_h_hat = unpatchify(
+        patches_hat,
+        channels=latent_channels,
+        height=latent_height,
+        width=latent_width,
+        patch_size=patch_size,
+    )
     z_hat = z_l_up + z_h_hat
 
     vae_cfg = macro_config.get("vae", {})
     vae_checkpoint = resolve_vae_checkpoint(vae_cfg, args.vae_checkpoint)
     vae = load_sd_vae(checkpoint=str(vae_checkpoint), cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
     macro_images = decode_latents(vae, z_l_up)
+    micro_images = decode_latents(vae, z_h_hat)
     full_images = decode_latents(vae, z_hat)
 
     nrow = max(1, int(args.num_samples**0.5))
     macro_out = Path(args.macro_out)
     macro_out.parent.mkdir(parents=True, exist_ok=True)
     save_image((macro_images.float().clamp(-1, 1) + 1.0) / 2.0, macro_out, nrow=nrow)
+    micro_out = Path(args.micro_out)
+    micro_out.parent.mkdir(parents=True, exist_ok=True)
+    save_image((micro_images.float().clamp(-1, 1) + 1.0) / 2.0, micro_out, nrow=nrow)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     save_image((full_images.float().clamp(-1, 1) + 1.0) / 2.0, out, nrow=nrow)
+    comparison_out = Path(args.comparison_out)
+    comparison_out.parent.mkdir(parents=True, exist_ok=True)
+    comparison_images = torch.cat([macro_images, micro_images, full_images], dim=0)
+    save_image((comparison_images.float().clamp(-1, 1) + 1.0) / 2.0, comparison_out, nrow=args.num_samples)
     print(f"saved {macro_out}")
+    print(f"saved {micro_out}")
     print(f"saved {out}")
+    print(f"saved {comparison_out}")
 
 
 if __name__ == "__main__":

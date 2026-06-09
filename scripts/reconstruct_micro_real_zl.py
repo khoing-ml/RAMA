@@ -57,6 +57,18 @@ def choose_tokens(logits: torch.Tensor, use_sampling: bool, temperature: float) 
     return torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).reshape(logits.shape[:-1])
 
 
+def resolve_patch_size(config: dict[str, object]) -> int:
+    micro_latent_cfg = config.get("micro_latent", {})
+    rama_cfg = config.get("rama", {})
+    micro_cfg = config.get("micro", config.get("micro_rama_net", {}))
+    return int(
+        micro_latent_cfg.get(
+            "patch_size",
+            rama_cfg.get("patch_size", micro_cfg.get("patch_size", 2)),
+        )
+    )
+
+
 def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.micro_checkpoint, map_location="cpu")
@@ -75,6 +87,7 @@ def main() -> None:
 
     bases = torch.load(args.bases, map_location="cpu").float()
     projector = RAMAProjector(bases).to(args.device)
+    patch_size = resolve_patch_size(config)
     dataset = CachedMicroLatentDataset(args.latent_cache)
     item = dataset[args.index]
     if "z" in item:
@@ -93,7 +106,13 @@ def main() -> None:
         tokens = choose_tokens(logits, args.use_sampling, args.temperature)
         y_hat = tokenizer.dequantize(tokens)
         patches_hat = projector.inverse(y_hat)
-        z_h_hat = unpatchify(patches_hat, channels=4, height=32, width=32, patch_size=2)
+        z_h_hat = unpatchify(
+            patches_hat,
+            channels=z_l_up.shape[1],
+            height=z_l_up.shape[2],
+            width=z_l_up.shape[3],
+            patch_size=patch_size,
+        )
         z_hat = z_l_up + z_h_hat
         vae = load_sd_vae(checkpoint=args.vae_checkpoint, cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
         images = torch.cat([decode_latents(vae, z), decode_latents(vae, z_l_up), decode_latents(vae, z_hat)], dim=0)
@@ -106,4 +125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

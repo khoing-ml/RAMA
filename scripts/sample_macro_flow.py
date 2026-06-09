@@ -51,6 +51,14 @@ def load_config(path: str | None, checkpoint: dict[str, object]) -> dict[str, ob
         return yaml.safe_load(handle)
 
 
+def resolve_full_latent_size(config: dict[str, object], macro_resolution: int) -> int:
+    evaluation_cfg = config.get("evaluation", {})
+    if "full_latent_size" in evaluation_cfg:
+        return int(evaluation_cfg["full_latent_size"])
+    factor = int(config.get("decomposition", {}).get("macro_downsample_factor", 2))
+    return int(macro_resolution) * factor
+
+
 def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
@@ -65,7 +73,8 @@ def main() -> None:
 
     shape = (args.num_samples, model.in_channels, model.resolution, model.resolution)
     z_l = sample_macro_latents(model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
-    z_l_up = F.interpolate(z_l, size=(32, 32), mode="bilinear", align_corners=False)
+    full_latent_size = resolve_full_latent_size(config, model.resolution)
+    z_l_up = F.interpolate(z_l, size=(full_latent_size, full_latent_size), mode="bilinear", align_corners=False)
     vae_cfg = config.get("vae", {})
     vae_checkpoint = resolve_vae_checkpoint(vae_cfg, args.vae_checkpoint)
     vae = load_sd_vae(checkpoint=str(vae_checkpoint), cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
