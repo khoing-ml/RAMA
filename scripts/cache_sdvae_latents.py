@@ -4,6 +4,7 @@ import argparse
 from io import BytesIO
 import sys
 from pathlib import Path
+import tempfile
 
 import torch
 from PIL import Image
@@ -136,6 +137,15 @@ def main() -> None:
     args = parse_args()
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(dir=out_dir, prefix=".write_test_", delete=True):
+            pass
+    except OSError as exc:
+        raise OSError(
+            f"latent output directory is not writable: {out_dir}\n"
+            "Choose a writable output path. On Kaggle, /kaggle/input is read-only; "
+            "use /kaggle/working/rama_latents or another /kaggle/working path."
+        ) from exc
 
     dataset = build_image_dataset(args.images, image_size=args.image_size)
     vae = load_sd_vae(

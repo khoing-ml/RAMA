@@ -61,10 +61,10 @@ DEVICE="${DEVICE:-cuda}"
 
 MACRO_STEPS="${MACRO_STEPS:-200000}"
 MICRO_STEPS="${MICRO_STEPS:-200000}"
-MACRO_BATCH="${MACRO_BATCH:-256}"
-MICRO_BATCH="${MICRO_BATCH:-128}"
+MACRO_BATCH="${MACRO_BATCH:-128}"
+MICRO_BATCH="${MICRO_BATCH:-64}"
 CACHE_BATCH="${CACHE_BATCH:-32}"
-FID_EVERY="${FID_EVERY:-10000}"
+FID_EVERY="${FID_EVERY:-5000}"
 FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-1024}"
 MACRO_FID_EVERY="${MACRO_FID_EVERY:-${FID_EVERY}}"
 MICRO_FID_EVERY="${MICRO_FID_EVERY:-${FID_EVERY}}"
@@ -207,9 +207,23 @@ EOF
   exit 1
 fi
 
+if [[ "${SKIP_CACHE:-0}" != "1" && "${DRY_RUN:-0}" != "1" && "${LATENTS_DIR}" == /kaggle/input/* ]]; then
+  cat >&2 <<EOF
+Latent output directory is under Kaggle's read-only input mount:
+  LATENTS_DIR=${LATENTS_DIR}
+
+Write generated latents to /kaggle/working instead, for example:
+  export LATENTS_DIR=/kaggle/working/rama_latents
+
+Use SKIP_CACHE=1 only if the latents already exist in a mounted input dataset.
+EOF
+  exit 1
+fi
+
 export WANDB_PROJECT="${WANDB_PROJECT:-rama}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 run_command() {
   echo
