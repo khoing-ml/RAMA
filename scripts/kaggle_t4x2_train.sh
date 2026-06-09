@@ -5,6 +5,8 @@ set -euo pipefail
 #
 # Optional environment overrides:
 #   PYTHON_BIN=python
+#   LOG_DIR=logs
+#   LOG_FILE=logs/kaggle_t4x2_train_<timestamp>.log
 #   IMAGES_DIR=/kaggle/input/celeba-256
 #   LATENTS_DIR=/kaggle/working/rama_latents
 #   OUTPUT_ROOT=/kaggle/working/rama_outputs
@@ -14,11 +16,33 @@ set -euo pipefail
 #   MACRO_BATCH=32
 #   MICRO_BATCH=16
 #   CACHE_BATCH=32
+#   FID_EVERY=10000
+#   FID_NUM_SAMPLES=1024
+#   MACRO_FID_EVERY=10000
+#   MICRO_FID_EVERY=10000
+#   MACRO_FID_NUM_SAMPLES=1024
+#   MICRO_FID_NUM_SAMPLES=1024
+#   QUANT_BATCH=16
+#   QUANT_MAX_BATCHES=200
+#   QUANT_PERCENTILE=99.5
+#   NUM_BINS=256
 #   TRAIN_WORKERS=2
 #   SAMPLE_COUNT=16
+#   SAMPLE_STEPS=50
+#   SAMPLER=heun
+#   SAMPLE_TEMPERATURE=1.0
+#   SAMPLE_ARGMAX=1
+#   FORCE_CACHE=1
+#   SKIP_CACHE=1
+#   SKIP_MACRO=1
+#   SKIP_QUANT_RECONSTRUCTION=1
+#   SKIP_MICRO=1
+#   SKIP_SAMPLING=1
+#   DRY_RUN=1
 #   SKIP_INSTALL=1
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+LOG_DIR="${LOG_DIR:-logs}"
 IMAGES_DIR="${IMAGES_DIR:-data/celeba256}"
 LATENTS_DIR="${LATENTS_DIR:-/kaggle/working/rama_latents}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/kaggle/working/rama_outputs}"
@@ -27,15 +51,133 @@ MICRO_OUT="${MICRO_OUT:-${OUTPUT_ROOT}/micro_rama}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-/kaggle/working/hf_cache}"
 BASES_PATH="${BASES_PATH:-cache/rama_bases_p256_d16.pt}"
 TOKENIZER_CONFIG="${TOKENIZER_CONFIG:-/kaggle/working/rama_tokenizer_config.pt}"
+VAE_CHECKPOINT="${VAE_CHECKPOINT:-stabilityai/sd-vae-ft-mse}"
+MACRO_CONFIG="${MACRO_CONFIG:-configs/celeba256_sdvae_macro.yaml}"
+MICRO_CONFIG="${MICRO_CONFIG:-configs/celeba256_sdvae_micro.yaml}"
+IMAGE_SIZE="${IMAGE_SIZE:-256}"
+DTYPE="${DTYPE:-fp16}"
+DEVICE="${DEVICE:-cuda}"
 
-MACRO_STEPS="${MACRO_STEPS:-200000}"  
+MACRO_STEPS="${MACRO_STEPS:-200000}"
 MICRO_STEPS="${MICRO_STEPS:-200000}"
 MACRO_BATCH="${MACRO_BATCH:-128}"
 MICRO_BATCH="${MICRO_BATCH:-64}"
 CACHE_BATCH="${CACHE_BATCH:-32}"
+FID_EVERY="${FID_EVERY:-10000}"
+FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-1024}"
+MACRO_FID_EVERY="${MACRO_FID_EVERY:-${FID_EVERY}}"
+MICRO_FID_EVERY="${MICRO_FID_EVERY:-${FID_EVERY}}"
+MACRO_FID_NUM_SAMPLES="${MACRO_FID_NUM_SAMPLES:-${FID_NUM_SAMPLES}}"
+MICRO_FID_NUM_SAMPLES="${MICRO_FID_NUM_SAMPLES:-${FID_NUM_SAMPLES}}"
+QUANT_BATCH="${QUANT_BATCH:-16}"
+QUANT_MAX_BATCHES="${QUANT_MAX_BATCHES:-200}"
+QUANT_PERCENTILE="${QUANT_PERCENTILE:-99.5}"
+NUM_BINS="${NUM_BINS:-256}"
 TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-16}"
 SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
+SAMPLER="${SAMPLER:-heun}"
+SAMPLE_TEMPERATURE="${SAMPLE_TEMPERATURE:-1.0}"
+ACCELERATE_NUM_PROCESSES="${ACCELERATE_NUM_PROCESSES:-2}"
+ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-fp16}"
+
+extra_args=()
+
+add_bool_flag() {
+  local env_name="$1"
+  local flag="$2"
+  if [[ "${!env_name:-0}" == "1" ]]; then
+    extra_args+=("${flag}")
+  fi
+}
+
+add_bool_flag FORCE_CACHE --force-cache
+add_bool_flag SKIP_CACHE --skip-cache
+add_bool_flag SKIP_MACRO --skip-macro
+add_bool_flag SKIP_QUANT_RECONSTRUCTION --skip-quant-reconstruction
+add_bool_flag SKIP_MICRO --skip-micro
+add_bool_flag SKIP_SAMPLING --skip-sampling
+add_bool_flag SAMPLE_ARGMAX --sample-argmax
+add_bool_flag DRY_RUN --dry-run
+
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/kaggle_t4x2_train_${RUN_ID}.log}"
+mkdir -p "${LOG_DIR}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "Logging run to ${LOG_FILE}"
+echo "Run id: ${RUN_ID}"
+echo "Started at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+print_file_if_exists() {
+  local label="$1"
+  local path="$2"
+
+  echo
+  echo "===== ${label}: ${path} ====="
+  if [[ -f "${path}" ]]; then
+    sed 's/^/  /' "${path}"
+  else
+    echo "  Missing: ${path}"
+  fi
+}
+
+cat <<EOF
+
+===== Resolved launcher config =====
+PYTHON_BIN=${PYTHON_BIN}
+IMAGES_DIR=${IMAGES_DIR}
+LATENTS_DIR=${LATENTS_DIR}
+OUTPUT_ROOT=${OUTPUT_ROOT}
+MACRO_OUT=${MACRO_OUT}
+MICRO_OUT=${MICRO_OUT}
+HF_CACHE_DIR=${HF_CACHE_DIR}
+BASES_PATH=${BASES_PATH}
+TOKENIZER_CONFIG=${TOKENIZER_CONFIG}
+VAE_CHECKPOINT=${VAE_CHECKPOINT}
+MACRO_CONFIG=${MACRO_CONFIG}
+MICRO_CONFIG=${MICRO_CONFIG}
+IMAGE_SIZE=${IMAGE_SIZE}
+DTYPE=${DTYPE}
+DEVICE=${DEVICE}
+MACRO_STEPS=${MACRO_STEPS}
+MICRO_STEPS=${MICRO_STEPS}
+MACRO_BATCH=${MACRO_BATCH}
+MICRO_BATCH=${MICRO_BATCH}
+CACHE_BATCH=${CACHE_BATCH}
+FID_EVERY=${FID_EVERY}
+FID_NUM_SAMPLES=${FID_NUM_SAMPLES}
+MACRO_FID_EVERY=${MACRO_FID_EVERY}
+MICRO_FID_EVERY=${MICRO_FID_EVERY}
+MACRO_FID_NUM_SAMPLES=${MACRO_FID_NUM_SAMPLES}
+MICRO_FID_NUM_SAMPLES=${MICRO_FID_NUM_SAMPLES}
+QUANT_BATCH=${QUANT_BATCH}
+QUANT_MAX_BATCHES=${QUANT_MAX_BATCHES}
+QUANT_PERCENTILE=${QUANT_PERCENTILE}
+NUM_BINS=${NUM_BINS}
+TRAIN_WORKERS=${TRAIN_WORKERS}
+SAMPLE_COUNT=${SAMPLE_COUNT}
+SAMPLE_STEPS=${SAMPLE_STEPS}
+SAMPLER=${SAMPLER}
+SAMPLE_TEMPERATURE=${SAMPLE_TEMPERATURE}
+ACCELERATE_NUM_PROCESSES=${ACCELERATE_NUM_PROCESSES}
+ACCELERATE_MIXED_PRECISION=${ACCELERATE_MIXED_PRECISION}
+WANDB_PROJECT=${WANDB_PROJECT:-rama}
+WANDB_ENTITY=${WANDB_ENTITY:-}
+SKIP_INSTALL=${SKIP_INSTALL:-0}
+FORCE_CACHE=${FORCE_CACHE:-0}
+SKIP_CACHE=${SKIP_CACHE:-0}
+SKIP_MACRO=${SKIP_MACRO:-0}
+SKIP_QUANT_RECONSTRUCTION=${SKIP_QUANT_RECONSTRUCTION:-0}
+SKIP_MICRO=${SKIP_MICRO:-0}
+SKIP_SAMPLING=${SKIP_SAMPLING:-0}
+SAMPLE_ARGMAX=${SAMPLE_ARGMAX:-0}
+DRY_RUN=${DRY_RUN:-0}
+EXTRA_ARGS=${extra_args[*]:-}
+EOF
+
+print_file_if_exists "Macro YAML config" "${MACRO_CONFIG}"
+print_file_if_exists "Micro YAML config" "${MICRO_CONFIG}"
 
 if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
   "${PYTHON_BIN}" -m pip install -r requirements.txt
@@ -45,7 +187,7 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
   "${PYTHON_BIN}" -m wandb login "${WANDB_API_KEY}"
 fi
 
-if [[ ! -d "${IMAGES_DIR}" ]]; then
+if [[ "${SKIP_CACHE:-0}" != "1" && "${DRY_RUN:-0}" != "1" && ! -d "${IMAGES_DIR}" ]]; then
   cat >&2 <<EOF
 Input image directory not found: ${IMAGES_DIR}
 
@@ -69,12 +211,13 @@ export TOKENIZERS_PARALLELISM=false
 "${PYTHON_BIN}" scripts/train_end_to_end_discrete_rama.py \
   --images "${IMAGES_DIR}" \
   --latents "${LATENTS_DIR}" \
-  --vae-checkpoint stabilityai/sd-vae-ft-mse \
+  --vae-checkpoint "${VAE_CHECKPOINT}" \
   --hf-cache-dir "${HF_CACHE_DIR}" \
-  --dtype fp16 \
-  --device cuda \
-  --macro-config configs/celeba256_sdvae_macro.yaml \
-  --micro-config configs/celeba256_sdvae_micro.yaml \
+  --image-size "${IMAGE_SIZE}" \
+  --dtype "${DTYPE}" \
+  --device "${DEVICE}" \
+  --macro-config "${MACRO_CONFIG}" \
+  --micro-config "${MICRO_CONFIG}" \
   --macro-out "${MACRO_OUT}" \
   --micro-out "${MICRO_OUT}" \
   --bases "${BASES_PATH}" \
@@ -86,10 +229,20 @@ export TOKENIZERS_PARALLELISM=false
   --train-num-workers "${TRAIN_WORKERS}" \
   --macro-max-steps "${MACRO_STEPS}" \
   --micro-max-steps "${MICRO_STEPS}" \
+  --macro-fid-every "${MACRO_FID_EVERY}" \
+  --micro-fid-every "${MICRO_FID_EVERY}" \
+  --macro-fid-num-samples "${MACRO_FID_NUM_SAMPLES}" \
+  --micro-fid-num-samples "${MICRO_FID_NUM_SAMPLES}" \
+  --quant-batch-size "${QUANT_BATCH}" \
+  --quant-max-batches "${QUANT_MAX_BATCHES}" \
+  --quant-percentile "${QUANT_PERCENTILE}" \
+  --num-bins "${NUM_BINS}" \
   --sample-num-samples "${SAMPLE_COUNT}" \
   --sample-steps "${SAMPLE_STEPS}" \
-  --sampler heun \
+  --sampler "${SAMPLER}" \
+  --sample-temperature "${SAMPLE_TEMPERATURE}" \
   --use-accelerate \
-  --accelerate-num-processes 2 \
-  --accelerate-mixed-precision fp16 \
-  --enable-wandb
+  --accelerate-num-processes "${ACCELERATE_NUM_PROCESSES}" \
+  --accelerate-mixed-precision "${ACCELERATE_MIXED_PRECISION}" \
+  --enable-wandb \
+  "${extra_args[@]}"

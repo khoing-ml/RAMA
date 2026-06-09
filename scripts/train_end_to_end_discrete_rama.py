@@ -39,6 +39,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-num-workers", type=int, default=4)
     parser.add_argument("--macro-max-steps", type=int, default=None)
     parser.add_argument("--micro-max-steps", type=int, default=None)
+    parser.add_argument("--macro-fid-every", type=int, default=None, help="Override macro evaluation.fid_every_steps; <=0 disables macro FID.")
+    parser.add_argument("--micro-fid-every", type=int, default=None, help="Override micro evaluation.fid_every_steps; <=0 disables micro FID.")
+    parser.add_argument("--macro-fid-num-samples", type=int, default=None, help="Override macro evaluation.fid_num_samples.")
+    parser.add_argument("--micro-fid-num-samples", type=int, default=None, help="Override micro evaluation.fid_num_samples.")
     parser.add_argument("--quant-batch-size", type=int, default=16)
     parser.add_argument("--quant-max-batches", type=int, default=200)
     parser.add_argument("--quant-percentile", type=float, default=99.5)
@@ -183,6 +187,8 @@ def main() -> None:
         command.extend(["--num-workers", str(args.train_num_workers)])
         add_optional(command, "--batch-size", args.macro_batch_size)
         add_optional(command, "--max-steps", args.macro_max_steps)
+        add_optional(command, "--fid-every", args.macro_fid_every)
+        add_optional(command, "--fid-num-samples", args.macro_fid_num_samples)
         if args.disable_wandb:
             command.append("--disable-wandb")
         run(command, args.dry_run)
@@ -263,6 +269,8 @@ def main() -> None:
         )
         add_optional(command, "--batch-size", args.micro_batch_size)
         add_optional(command, "--max-steps", args.micro_max_steps)
+        add_optional(command, "--fid-every", args.micro_fid_every)
+        add_optional(command, "--fid-num-samples", args.micro_fid_num_samples)
         if args.disable_wandb:
             command.append("--disable-wandb")
         run(command, args.dry_run)

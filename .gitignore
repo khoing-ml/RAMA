@@ -9,9 +9,9 @@ __pycache__/
 checkpoints/
 data/
 outputs/
+logs/
 
 *.pt
 *.pth
 *.ckpt
 *.safetensors
-
