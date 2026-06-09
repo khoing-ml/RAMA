@@ -18,10 +18,7 @@ set -euo pipefail
 #   CACHE_BATCH=32
 #   FID_EVERY=10000
 #   FID_NUM_SAMPLES=1024
-#   MACRO_FID_EVERY=10000
-#   MICRO_FID_EVERY=10000
-#   MACRO_FID_NUM_SAMPLES=1024
-#   MICRO_FID_NUM_SAMPLES=1024
+#   SAMPLE_EVERY=2000
 #   QUANT_BATCH=16
 #   QUANT_MAX_BATCHES=200
 #   QUANT_PERCENTILE=99.5
@@ -64,12 +61,9 @@ MICRO_STEPS="${MICRO_STEPS:-200000}"
 MACRO_BATCH="${MACRO_BATCH:-128}"
 MICRO_BATCH="${MICRO_BATCH:-64}"
 CACHE_BATCH="${CACHE_BATCH:-32}"
-FID_EVERY="${FID_EVERY:-5000}"
+FID_EVERY="${FID_EVERY:-10000}"
 FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-1024}"
-MACRO_FID_EVERY="${MACRO_FID_EVERY:-${FID_EVERY}}"
-MICRO_FID_EVERY="${MICRO_FID_EVERY:-${FID_EVERY}}"
-MACRO_FID_NUM_SAMPLES="${MACRO_FID_NUM_SAMPLES:-${FID_NUM_SAMPLES}}"
-MICRO_FID_NUM_SAMPLES="${MICRO_FID_NUM_SAMPLES:-${FID_NUM_SAMPLES}}"
+SAMPLE_EVERY="${SAMPLE_EVERY:-2000}"
 QUANT_BATCH="${QUANT_BATCH:-16}"
 QUANT_MAX_BATCHES="${QUANT_MAX_BATCHES:-200}"
 QUANT_PERCENTILE="${QUANT_PERCENTILE:-99.5}"
@@ -149,10 +143,8 @@ MICRO_BATCH=${MICRO_BATCH}
 CACHE_BATCH=${CACHE_BATCH}
 FID_EVERY=${FID_EVERY}
 FID_NUM_SAMPLES=${FID_NUM_SAMPLES}
-MACRO_FID_EVERY=${MACRO_FID_EVERY}
-MICRO_FID_EVERY=${MICRO_FID_EVERY}
-MACRO_FID_NUM_SAMPLES=${MACRO_FID_NUM_SAMPLES}
-MICRO_FID_NUM_SAMPLES=${MICRO_FID_NUM_SAMPLES}
+SAMPLE_EVERY=${SAMPLE_EVERY}
+SAMPLE_COUNT=${SAMPLE_COUNT}
 QUANT_BATCH=${QUANT_BATCH}
 QUANT_MAX_BATCHES=${QUANT_MAX_BATCHES}
 QUANT_PERCENTILE=${QUANT_PERCENTILE}
@@ -326,13 +318,17 @@ if [[ "${SKIP_MACRO:-0}" != "1" && "${SKIP_MICRO:-0}" != "1" ]]; then
     --micro-batch-size "${MICRO_BATCH}" \
     --macro-max-steps "${MACRO_STEPS}" \
     --micro-max-steps "${MICRO_STEPS}" \
-    --macro-fid-every "${MACRO_FID_EVERY}" \
-    --micro-fid-every "${MICRO_FID_EVERY}" \
-    --macro-fid-num-samples "${MACRO_FID_NUM_SAMPLES}" \
-    --micro-fid-num-samples "${MICRO_FID_NUM_SAMPLES}"
+    --fid-every "${FID_EVERY}" \
+    --fid-num-samples "${FID_NUM_SAMPLES}" \
+    --sample-every "${SAMPLE_EVERY}" \
+    --num-samples "${SAMPLE_COUNT}" \
+    --sampler "${SAMPLER}" \
+    --sample-steps "${SAMPLE_STEPS}" \
+    --temperature "${SAMPLE_TEMPERATURE}" \
   )
   add_optional_cli_flag joint_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}"
+  add_optional_cli_flag joint_args --sample-argmax "${SAMPLE_ARGMAX:-0}"
+  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
 elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
   macro_args=(
     --config "${MACRO_CONFIG}" \
@@ -341,11 +337,11 @@ elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
     --num-workers "${TRAIN_WORKERS}" \
     --batch-size "${MACRO_BATCH}" \
     --max-steps "${MACRO_STEPS}" \
-    --fid-every "${MACRO_FID_EVERY}" \
-    --fid-num-samples "${MACRO_FID_NUM_SAMPLES}"
+    --fid-every "${FID_EVERY}" \
+    --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag macro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}"
+  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
   echo "Skipping micro training"
 elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
   micro_args=(
@@ -358,11 +354,11 @@ elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
     --num-workers "${TRAIN_WORKERS}" \
     --batch-size "${MICRO_BATCH}" \
     --max-steps "${MICRO_STEPS}" \
-    --fid-every "${MICRO_FID_EVERY}" \
-    --fid-num-samples "${MICRO_FID_NUM_SAMPLES}"
+    --fid-every "${FID_EVERY}" \
+    --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag micro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}"
+  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
   echo "Skipping macro training"
 else
   echo "Skipping macro training"

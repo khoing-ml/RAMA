@@ -7,9 +7,11 @@ from itertools import cycle
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from torchvision.utils import make_grid, save_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -17,28 +19,163 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.train_macro_flow import (
     checkpoint_path as macro_checkpoint_path,
-    evaluate_macro_fid,
     resolve_vae_checkpoint,
     save_checkpoint as save_macro_checkpoint,
 )
 from scripts.train_micro_rama import (
     checkpoint_path as micro_checkpoint_path,
-    evaluate_micro_fid,
     load_or_make_bases,
     load_tokenizer,
+    sample_tokens,
     save_checkpoint as save_micro_checkpoint,
 )
-from src.evaluation.fid import InceptionFID
+from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
+from src.flow.sampler import sample_macro_latents
 from src.micro.loss import categorical_micro_loss, continuous_micro_nll_loss
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.modules.ema import EMA
 from src.modules.flow_matching import flow_matching_loss
+from src.modules.latent_decomposition import reconstruct_from_decomposition
 from src.modules.latent_dataset import CachedMicroLatentDataset
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net
-from src.modules.rama import patchify
+from src.modules.rama import patchify, unpatchify
 from src.modules.unet_flow import build_unet_flow
-from src.modules.vae_utils import load_sd_vae
+from src.modules.vae_utils import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
+
+
+@torch.no_grad()
+def evaluate_full_fid(
+    macro_model: torch.nn.Module,
+    context_encoder: torch.nn.Module,
+    micro_model: torch.nn.Module,
+    dataset: CachedMicroLatentDataset,
+    vae: torch.nn.Module,
+    fid_model: InceptionFID,
+    projector: RAMAProjector,
+    tokenizer,
+    num_samples: int,
+    batch_size: int,
+    sampler: str,
+    sampler_steps: int,
+    patch_size: int,
+    latent_channels: int,
+    latent_height: int,
+    latent_width: int,
+    temperature: float,
+    use_argmax: bool,
+    device: torch.device,
+) -> float:
+    macro_was_training = macro_model.training
+    ctx_was_training = context_encoder.training
+    micro_was_training = micro_model.training
+    macro_model.eval()
+    context_encoder.eval()
+    micro_model.eval()
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
+    real_batches: list[torch.Tensor] = []
+    fake_batches: list[torch.Tensor] = []
+
+    remaining = num_samples
+    for batch in loader:
+        if remaining <= 0:
+            break
+        z_l = batch["z_L"][:remaining].to(device)
+        z_h = batch["z_H"][:remaining].to(device)
+        z_real = reconstruct_from_decomposition(z_l, z_h)
+        real_batches.append(fid_model(decode_latents(vae, z_real)))
+        remaining -= z_l.shape[0]
+
+    remaining = num_samples
+    while remaining > 0:
+        current_batch = min(batch_size, remaining)
+        shape = (current_batch, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
+        z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
+        z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
+        context = context_encoder(z_l)
+        logits = micro_model(context)
+        tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+        y_hat = tokenizer.dequantize(tokens)
+        patches_hat = projector.inverse(y_hat)
+        z_h_hat = unpatchify(patches_hat, channels=latent_channels, height=latent_height, width=latent_width, patch_size=patch_size)
+        z_hat = z_l_up + z_h_hat
+        fake_batches.append(fid_model(decode_latents(vae, z_hat)))
+        remaining -= current_batch
+
+    if macro_was_training:
+        macro_model.train()
+    if ctx_was_training:
+        context_encoder.train()
+    if micro_was_training:
+        micro_model.train()
+    return calculate_fid(stats_from_feature_batches(real_batches), stats_from_feature_batches(fake_batches))
+
+
+@torch.no_grad()
+def sample_and_save(
+    macro_model: torch.nn.Module,
+    context_encoder: torch.nn.Module,
+    micro_model: torch.nn.Module,
+    vae: torch.nn.Module,
+    projector: RAMAProjector,
+    tokenizer,
+    samples_dir: Path,
+    joint_step: int,
+    num_samples: int,
+    sampler: str,
+    sampler_steps: int,
+    patch_size: int,
+    latent_channels: int,
+    latent_height: int,
+    latent_width: int,
+    temperature: float,
+    use_argmax: bool,
+    device: torch.device,
+) -> None:
+    macro_was_training = macro_model.training
+    ctx_was_training = context_encoder.training
+    micro_was_training = micro_model.training
+    macro_model.eval()
+    context_encoder.eval()
+    micro_model.eval()
+
+    shape = (num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
+    z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
+    z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
+    context = context_encoder(z_l)
+    logits = micro_model(context)
+    tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+    y_hat = tokenizer.dequantize(tokens)
+    patches_hat = projector.inverse(y_hat)
+    z_h_hat = unpatchify(patches_hat, channels=latent_channels, height=latent_height, width=latent_width, patch_size=patch_size)
+    z_hat = z_l_up + z_h_hat
+
+    macro_images = decode_latents(vae, z_l_up)
+    micro_images = decode_latents(vae, z_h_hat)
+    full_images = decode_latents(vae, z_hat)
+
+    macro_images = macro_images.clamp(-1, 1).mul(0.5).add(0.5)
+    micro_images = micro_images.clamp(-1, 1).mul(0.5).add(0.5)
+    full_images = full_images.clamp(-1, 1).mul(0.5).add(0.5)
+
+    nrow = max(1, int(num_samples ** 0.5))
+    step_dir = samples_dir / f"step_{joint_step:08d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+
+    save_image(macro_images, step_dir / "macro.png", nrow=nrow)
+    save_image(micro_images, step_dir / "micro.png", nrow=nrow)
+    save_image(full_images, step_dir / "full.png", nrow=nrow)
+
+    comparison = torch.stack([macro_images, micro_images, full_images], dim=1).flatten(0, 1)
+    save_image(comparison, step_dir / "comparison.png", nrow=3)
+
+    if macro_was_training:
+        macro_model.train()
+    if ctx_was_training:
+        context_encoder.train()
+    if micro_was_training:
+        micro_model.train()
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,10 +195,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--micro-type", choices=("categorical", "continuous"), default=None)
     parser.add_argument("--tokenizer-config", default=None)
     parser.add_argument("--bases", default=None)
-    parser.add_argument("--macro-fid-every", type=int, default=None)
-    parser.add_argument("--micro-fid-every", type=int, default=None)
-    parser.add_argument("--macro-fid-num-samples", type=int, default=None)
-    parser.add_argument("--micro-fid-num-samples", type=int, default=None)
+    parser.add_argument("--fid-every", type=int, default=None)
+    parser.add_argument("--fid-num-samples", type=int, default=None)
+    parser.add_argument("--fid-batch-size", type=int, default=None)
+    parser.add_argument("--sample-every", type=int, default=None)
+    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--sampler", choices=("heun", "euler"), default="heun")
+    parser.add_argument("--sample-steps", type=int, default=50)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--sample-argmax", action="store_true")
+    parser.add_argument("--samples-dir", default="outputs/samples")
     parser.add_argument("--disable-wandb", action="store_true")
     return parser.parse_args()
 
@@ -223,25 +366,27 @@ def main() -> None:
         int(macro_logging.get("checkpoint_every_steps", 10000)),
         int(micro_logging.get("checkpoint_every_steps", 10000)),
     )
-    macro_fid_every = args.macro_fid_every if args.macro_fid_every is not None else int(macro_eval.get("fid_every_steps", 0))
-    micro_fid_every = args.micro_fid_every if args.micro_fid_every is not None else int(micro_eval.get("fid_every_steps", 0))
-    macro_fid_num_samples = args.macro_fid_num_samples or int(macro_eval.get("fid_num_samples", 512))
-    micro_fid_num_samples = args.micro_fid_num_samples or int(micro_eval.get("fid_num_samples", 512))
-    macro_fid_batch_size = int(macro_eval.get("fid_batch_size", min(macro_batch_size, 32)))
-    micro_fid_batch_size = int(micro_eval.get("fid_batch_size", min(micro_batch_size, 32)))
-    macro_fid_sampler = str(macro_eval.get("sampler", "heun"))
-    macro_fid_sampler_steps = int(macro_eval.get("sampler_steps", 50))
+    fid_every = args.fid_every if args.fid_every is not None else int(macro_eval.get("fid_every_steps", 0))
+    fid_num_samples = args.fid_num_samples or int(macro_eval.get("fid_num_samples", 512))
+    fid_batch_size = args.fid_batch_size or int(macro_eval.get("fid_batch_size", min(macro_batch_size, 32)))
+    sample_every = args.sample_every if args.sample_every is not None else int(macro_logging.get("sample_every_steps", 0))
+    num_samples = args.num_samples
+    fid_sampler = args.sampler
+    fid_sampler_steps = args.sample_steps
+    fid_temperature = args.temperature
+    fid_use_argmax = args.sample_argmax or bool(micro_eval.get("use_argmax", False))
     macro_full_latent_size = int(macro_eval.get("full_latent_size", 32))
-    micro_fid_temperature = float(micro_eval.get("temperature", 1.0))
-    micro_fid_use_argmax = bool(micro_eval.get("use_argmax", False))
+    samples_dir = Path(args.samples_dir)
     macro_grad_clip = float(macro_training.get("grad_clip", 1.0))
     micro_grad_clip = float(micro_training.get("grad_clip", 1.0))
     patch_size = int(micro_latent_cfg.get("patch_size", 2))
     context_noise_sigma = float(micro_config.get("context_encoder", {}).get("context_noise_sigma", 0.03))
+    residual_shape = [int(v) for v in micro_latent_cfg.get("residual_shape", [4, macro_full_latent_size, macro_full_latent_size])]
+    latent_channels, latent_height, latent_width = residual_shape
 
     vae = None
     fid_model = None
-    if accelerator.is_main_process and (macro_fid_every > 0 or micro_fid_every > 0):
+    if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
         vae_cfg = macro_config.get("vae", micro_config.get("vae", {}))
         vae = load_sd_vae(
             checkpoint=resolve_vae_checkpoint(vae_cfg),
@@ -291,41 +436,6 @@ def main() -> None:
                     f"macro_step={macro_step} loss={logs['macro/train/loss']:.6f} "
                     f"grad_norm={logs['macro/train/grad_norm']:.4f}"
                 )
-
-            if macro_fid_every > 0 and macro_step % macro_fid_every == 0:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    current_step = max(macro_step, micro_step)
-                    eval_model = accelerator.unwrap_model(macro_model)
-                    backup = None
-                    if macro_ema is not None:
-                        backup = {
-                            name: parameter.detach().clone()
-                            for name, parameter in eval_model.named_parameters()
-                            if parameter.requires_grad
-                        }
-                        macro_ema.copy_to(eval_model)
-                    fid = evaluate_macro_fid(
-                        eval_model,
-                        dataset,
-                        vae,
-                        fid_model,
-                        num_samples=min(macro_fid_num_samples, len(dataset)),
-                        batch_size=macro_fid_batch_size,
-                        sampler=macro_fid_sampler,
-                        sampler_steps=macro_fid_sampler_steps,
-                        full_latent_size=macro_full_latent_size,
-                        device=accelerator.device,
-                    )
-                    if backup is not None:
-                        with torch.no_grad():
-                            for name, parameter in eval_model.named_parameters():
-                                if name in backup:
-                                    parameter.copy_(backup[name])
-                    accelerator.log({"macro/eval/fid_macro": fid}, step=current_step)
-                    accelerator.print(f"macro_step={macro_step} fid_macro={fid:.4f}")
-                    macro_model.train()
-                accelerator.wait_for_everyone()
 
             if accelerator.is_main_process and macro_step % checkpoint_every == 0:
                 save_macro_checkpoint(
@@ -395,32 +505,6 @@ def main() -> None:
                     message += f" logabsdet_mean={logs['micro/train/logabsdet_mean']:.4f}"
                 accelerator.print(message)
 
-            if micro_fid_every > 0 and micro_step % micro_fid_every == 0:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    current_step = max(macro_step, micro_step)
-                    fid = evaluate_micro_fid(
-                        accelerator.unwrap_model(context_encoder),
-                        accelerator.unwrap_model(micro_model),
-                        dataset,
-                        vae,
-                        fid_model,
-                        projector,
-                        tokenizer,
-                        micro_type,
-                        num_samples=min(micro_fid_num_samples, len(dataset)),
-                        batch_size=micro_fid_batch_size,
-                        patch_size=patch_size,
-                        temperature=micro_fid_temperature,
-                        use_argmax=micro_fid_use_argmax,
-                        device=accelerator.device,
-                    )
-                    accelerator.log({"micro/eval/fid_micro_real_zL": fid}, step=current_step)
-                    accelerator.print(f"micro_step={micro_step} fid_micro_real_zL={fid:.4f}")
-                    context_encoder.train()
-                    micro_model.train()
-                accelerator.wait_for_everyone()
-
             if accelerator.is_main_process and micro_step % checkpoint_every == 0:
                 save_micro_checkpoint(
                     micro_checkpoint_path(micro_out, micro_step),
@@ -432,6 +516,77 @@ def main() -> None:
                 )
 
         joint_step = max(macro_step, micro_step)
+
+        if fid_every > 0 and joint_step > 0 and joint_step % fid_every == 0:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                eval_model = accelerator.unwrap_model(macro_model)
+                backup = None
+                if macro_ema is not None:
+                    backup = {
+                        name: parameter.detach().clone()
+                        for name, parameter in eval_model.named_parameters()
+                        if parameter.requires_grad
+                    }
+                    macro_ema.copy_to(eval_model)
+                fid = evaluate_full_fid(
+                    eval_model,
+                    accelerator.unwrap_model(context_encoder),
+                    accelerator.unwrap_model(micro_model),
+                    dataset,
+                    vae,
+                    fid_model,
+                    projector,
+                    tokenizer,
+                    num_samples=min(fid_num_samples, len(dataset)),
+                    batch_size=fid_batch_size,
+                    sampler=fid_sampler,
+                    sampler_steps=fid_sampler_steps,
+                    patch_size=patch_size,
+                    latent_channels=latent_channels,
+                    latent_height=latent_height,
+                    latent_width=latent_width,
+                    temperature=fid_temperature,
+                    use_argmax=fid_use_argmax,
+                    device=accelerator.device,
+                )
+                if backup is not None:
+                    with torch.no_grad():
+                        for name, parameter in eval_model.named_parameters():
+                            if name in backup:
+                                parameter.copy_(backup[name])
+                accelerator.log({"eval/fid_full": fid}, step=joint_step)
+                accelerator.print(f"step={joint_step} fid_full={fid:.4f}")
+                macro_model.train()
+                context_encoder.train()
+                micro_model.train()
+            accelerator.wait_for_everyone()
+
+        if sample_every > 0 and joint_step > 0 and joint_step % sample_every == 0:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                sample_and_save(
+                    accelerator.unwrap_model(macro_model),
+                    accelerator.unwrap_model(context_encoder),
+                    accelerator.unwrap_model(micro_model),
+                    vae,
+                    projector,
+                    tokenizer,
+                    samples_dir,
+                    joint_step,
+                    num_samples=num_samples,
+                    sampler=fid_sampler,
+                    sampler_steps=fid_sampler_steps,
+                    patch_size=patch_size,
+                    latent_channels=latent_channels,
+                    latent_height=latent_height,
+                    latent_width=latent_width,
+                    temperature=fid_temperature,
+                    use_argmax=fid_use_argmax,
+                    device=accelerator.device,
+                )
+                accelerator.print(f"step={joint_step} saved samples to {samples_dir}")
+            accelerator.wait_for_everyone()
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
