@@ -19,6 +19,19 @@ rama_bases:
   patch_dim: 16
   seed: 1234
 
+rama:
+  bases_path: cache/rama_bases_p256_d16.pt
+  patch_size: 2
+  num_patches: 256
+  patch_dim: 16
+
+tokenizer:
+  config_path: cache/rama_tokenizer_config.pt
+  num_bins: 256
+  bound: 3.0
+  bound_method: percentile_abs_y
+  percentile: 99.5
+
 context_encoder:
   in_channels: 4
   context_dim: 256
@@ -28,8 +41,28 @@ context_encoder:
   grid_size: [16, 16]
   context_noise_sigma: 0.03
 
+micro:
+  type: categorical
+  context_dim: 256
+  patch_dim: 16
+  dim_emb_dim: 64
+  hidden_dim: 512
+  num_layers: 4
+  num_bins: 256
+  loss: cross_entropy
+
 micro_rama_net:
-  type: conditional_rq_nsf
+  type: categorical
+  context_dim: 256
+  patch_dim: 16
+  dim_emb_dim: 64
+  hidden_dim: 512
+  num_layers: 4
+  num_bins: 256
+
+micro_continuous:
+  type: nflows
+  enabled: false
   context_dim: 256
   patch_dim: 16
   dim_emb_dim: 64
@@ -37,6 +70,7 @@ micro_rama_net:
   num_layers: 4
   spline_bins: 16
   tail_bound: 3.0
+  loss: negative_log_likelihood
 
 training:
   batch_size_per_gpu: 64
@@ -46,7 +80,7 @@ training:
   learning_rate: 2.0e-4
   betas: [0.9, 0.999]
   weight_decay: 1.0e-4
-  precision: bf16
+  precision: fp16
   total_steps: 200000
   grad_clip: 1.0
 

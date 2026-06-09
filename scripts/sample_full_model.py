@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+import yaml
+from torchvision.utils import save_image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.flow.sampler import sample_macro_latents
+from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
+from src.modules.ema import EMA
+from src.modules.micro_rama import build_context_encoder
+from src.modules.rama import unpatchify
+from src.modules.unet_flow import build_unet_flow
+from src.modules.vae_utils import decode_latents, load_sd_vae
+from src.rama.projector import RAMAProjector
+from src.rama.tokenizer import build_tokenizer_from_config, load_tokenizer_config
+
+
+def resolve_vae_checkpoint(vae_cfg: dict[str, object], override: str | None) -> str:
+    if override:
+        return override
+    local_checkpoint = vae_cfg.get("local_checkpoint")
+    if local_checkpoint and Path(str(local_checkpoint)).exists():
+        return str(local_checkpoint)
+    return str(vae_cfg.get("checkpoint_id", "stabilityai/sd-vae-ft-mse"))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Sample full images from macro flow plus categorical micro RAMA.")
+    parser.add_argument("--macro-checkpoint", required=True)
+    parser.add_argument("--micro-checkpoint", required=True)
+    parser.add_argument("--macro-config", default=None)
+    parser.add_argument("--micro-config", default=None)
+    parser.add_argument("--bases", default="cache/rama_bases_p256_d16.pt")
+    parser.add_argument("--tokenizer-config", default="cache/rama_tokenizer_config.pt")
+    parser.add_argument("--out", default="outputs/full_samples/generated_zL_macro_plus_micro.png")
+    parser.add_argument("--macro-out", default="outputs/full_samples/generated_zL_macro_only.png")
+    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--sampler", choices=("heun", "euler"), default="heun")
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--use-argmax", action="store_true")
+    parser.add_argument("--vae-checkpoint", default=None)
+    parser.add_argument("--cache-dir", default=".cache/huggingface")
+    parser.add_argument("--dtype", default="fp16", choices=("fp16", "bf16", "fp32"))
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    return parser.parse_args()
+
+
+def load_config(path: str | None, checkpoint: dict[str, object]) -> dict[str, object]:
+    if path is None:
+        return checkpoint.get("config", {})
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def sample_tokens(logits: torch.Tensor, temperature: float, use_argmax: bool) -> torch.Tensor:
+    if use_argmax:
+        return logits.argmax(dim=-1)
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    flat = probs.reshape(-1, probs.shape[-1])
+    return torch.multinomial(flat, num_samples=1).reshape(logits.shape[:-1])
+
+
+def main() -> None:
+    args = parse_args()
+    macro_checkpoint = torch.load(args.macro_checkpoint, map_location="cpu")
+    micro_checkpoint = torch.load(args.micro_checkpoint, map_location="cpu")
+    macro_config = load_config(args.macro_config, macro_checkpoint)
+    micro_config = load_config(args.micro_config, micro_checkpoint)
+
+    macro_model = build_unet_flow(macro_config.get("macro_flow_model", {})).to(args.device)
+    macro_model.load_state_dict(macro_checkpoint["model"])
+    if macro_checkpoint.get("ema") is not None:
+        ema = EMA(macro_model, decay=float(macro_config.get("training", {}).get("ema_decay", 0.9999)))
+        ema.load_state_dict(macro_checkpoint["ema"])
+        ema.copy_to(macro_model)
+    macro_model.eval()
+
+    tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config))
+    context_encoder = build_context_encoder(micro_config.get("context_encoder", {})).to(args.device)
+    micro_cfg = micro_config.get("micro", micro_config.get("micro_rama_net", {}))
+    micro_model = build_categorical_micro_rama_net(micro_cfg, num_bins=tokenizer.num_bins).to(args.device)
+    context_encoder.load_state_dict(micro_checkpoint["context_encoder"])
+    micro_model.load_state_dict(micro_checkpoint["micro_model"])
+    context_encoder.eval()
+    micro_model.eval()
+
+    bases = torch.load(args.bases, map_location="cpu").float()
+    projector = RAMAProjector(bases).to(args.device)
+    projector.requires_grad_(False)
+
+    shape = (args.num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
+    z_l = sample_macro_latents(macro_model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
+    z_l_up = F.interpolate(z_l, size=(32, 32), mode="bilinear", align_corners=False)
+    context = context_encoder(z_l)
+    logits = micro_model(context)
+    tokens = sample_tokens(logits, temperature=args.temperature, use_argmax=args.use_argmax)
+    y_hat = tokenizer.dequantize(tokens)
+    patches_hat = projector.inverse(y_hat)
+    z_h_hat = unpatchify(patches_hat, channels=4, height=32, width=32, patch_size=2)
+    z_hat = z_l_up + z_h_hat
+
+    vae_cfg = macro_config.get("vae", {})
+    vae_checkpoint = resolve_vae_checkpoint(vae_cfg, args.vae_checkpoint)
+    vae = load_sd_vae(checkpoint=str(vae_checkpoint), cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
+    macro_images = decode_latents(vae, z_l_up)
+    full_images = decode_latents(vae, z_hat)
+
+    nrow = max(1, int(args.num_samples**0.5))
+    macro_out = Path(args.macro_out)
+    macro_out.parent.mkdir(parents=True, exist_ok=True)
+    save_image((macro_images.float().clamp(-1, 1) + 1.0) / 2.0, macro_out, nrow=nrow)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    save_image((full_images.float().clamp(-1, 1) + 1.0) / 2.0, out, nrow=nrow)
+    print(f"saved {macro_out}")
+    print(f"saved {out}")
+
+
+if __name__ == "__main__":
+    main()

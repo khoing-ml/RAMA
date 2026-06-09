@@ -15,8 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.modules.latent_dataset import CachedMicroLatentDataset
-from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, micro_nll_loss
-from src.modules.rama import make_orthogonal_bases, patchify, rama_project
+from src.micro.loss import categorical_micro_loss, continuous_micro_nll_loss
+from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
+from src.modules.micro_rama import build_context_encoder, build_micro_rama_net
+from src.modules.rama import make_orthogonal_bases, patchify
+from src.rama.projector import RAMAProjector
+from src.rama.tokenizer import RAMATokenizer, build_tokenizer_from_config, load_tokenizer_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=None, help="Override per-process batch size.")
     parser.add_argument("--max-steps", type=int, default=None, help="Override training.total_steps for debug runs.")
+    parser.add_argument("--micro-type", choices=("categorical", "continuous"), default=None)
+    parser.add_argument("--tokenizer-config", default=None, help="Path to cache/rama_tokenizer_config.pt.")
+    parser.add_argument("--bases", default=None, help="Override RAMA bases path.")
     parser.add_argument("--disable-wandb", action="store_true", help="Run without initializing Weights & Biases.")
     return parser.parse_args()
 
@@ -62,8 +69,8 @@ def save_checkpoint(
     )
 
 
-def load_or_make_bases(config: dict[str, object]) -> torch.Tensor:
-    basis_path = Path(str(config.get("cache_path", "cache/rama_bases_p256_d16.pt")))
+def load_or_make_bases(config: dict[str, object], override_path: str | None = None) -> torch.Tensor:
+    basis_path = Path(str(override_path or config.get("cache_path", config.get("bases_path", "cache/rama_bases_p256_d16.pt"))))
     if basis_path.exists():
         return torch.load(basis_path, map_location="cpu").float()
 
@@ -78,12 +85,23 @@ def load_or_make_bases(config: dict[str, object]) -> torch.Tensor:
     return bases.float()
 
 
+def load_tokenizer(config: dict[str, object], override_path: str | None = None) -> RAMATokenizer:
+    config_path = Path(str(override_path or config.get("config_path", "cache/rama_tokenizer_config.pt")))
+    if config_path.exists():
+        return build_tokenizer_from_config(load_tokenizer_config(str(config_path)))
+    return RAMATokenizer(
+        num_bins=int(config.get("num_bins", 256)),
+        bound=float(config.get("bound", 3.0)),
+    )
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     training = config.get("training", {})
     logging_cfg = config.get("logging", {})
     micro_latent_cfg = config.get("micro_latent", {})
+    tokenizer_cfg = config.get("tokenizer", {})
 
     mixed_precision = str(training.get("precision", "fp32"))
     if mixed_precision not in {"fp16", "bf16"}:
@@ -114,15 +132,29 @@ def main() -> None:
     if len(dataloader) == 0:
         raise ValueError("latent dataset is smaller than the per-process batch size; lower batch size or add latents")
 
+    micro_type = args.micro_type or str(config.get("micro", {}).get("type", config.get("micro_rama_net", {}).get("type", "categorical")))
+    if micro_type == "conditional_rq_nsf":
+        micro_type = "continuous"
+    if micro_type not in {"categorical", "continuous"}:
+        raise ValueError(f"unsupported micro type: {micro_type}")
+
+    tokenizer = load_tokenizer(tokenizer_cfg, args.tokenizer_config) if micro_type == "categorical" else None
     context_encoder = build_context_encoder(config.get("context_encoder", {}))
-    micro_model = build_micro_rama_net(config.get("micro_rama_net", {}))
+    if micro_type == "categorical":
+        micro_model = build_categorical_micro_rama_net(
+            config.get("micro", config.get("micro_rama_net", {})),
+            num_bins=tokenizer.num_bins if tokenizer is not None else None,
+        )
+    else:
+        micro_model = build_micro_rama_net(config.get("micro_continuous", config.get("micro_rama_net", {})))
     optimizer = torch.optim.AdamW(
         list(context_encoder.parameters()) + list(micro_model.parameters()),
         lr=float(training.get("learning_rate", training.get("lr", 2.0e-4))),
         betas=tuple(training.get("betas", [0.9, 0.999])),
         weight_decay=float(training.get("weight_decay", 1.0e-4)),
     )
-    bases = load_or_make_bases(config.get("rama_bases", {}))
+    rama_cfg = config.get("rama", config.get("rama_bases", {}))
+    bases = load_or_make_bases(rama_cfg, args.bases)
 
     context_encoder, micro_model, optimizer, dataloader = accelerator.prepare(
         context_encoder,
@@ -130,8 +162,8 @@ def main() -> None:
         optimizer,
         dataloader,
     )
-    bases = bases.to(accelerator.device)
-    bases.requires_grad_(False)
+    projector = RAMAProjector(bases).to(accelerator.device)
+    projector.requires_grad_(False)
 
     start_step = 0
     if args.resume:
@@ -159,8 +191,8 @@ def main() -> None:
         for batch in dataloader:
             if step >= total_steps:
                 break
-            z_l = batch["z_L"]
-            z_h = batch["z_H"]
+            z_l = batch["z_L"].detach()
+            z_h = batch["z_H"].detach()
 
             with accelerator.accumulate(micro_model):
                 z_l_input = z_l
@@ -168,10 +200,19 @@ def main() -> None:
                     z_l_input = z_l_input + context_noise_sigma * torch.randn_like(z_l_input)
 
                 patches = patchify(z_h, patch_size=patch_size)
-                y = rama_project(patches, bases)
+                y = projector.project(patches)
                 context = context_encoder(z_l_input)
-                eps, logabsdet = micro_model(y, context)
-                loss = micro_nll_loss(eps, logabsdet)
+                if micro_type == "categorical":
+                    if tokenizer is None:
+                        raise RuntimeError("categorical micro training requires a RAMATokenizer")
+                    tokens = tokenizer.quantize(y)
+                    logits = micro_model(context)
+                    loss = categorical_micro_loss(logits, tokens, num_bins=tokenizer.num_bins)
+                    with torch.no_grad():
+                        token_acc = (logits.argmax(dim=-1) == tokens).float().mean()
+                else:
+                    eps, logabsdet = micro_model(y, context)
+                    loss = continuous_micro_nll_loss(eps, logabsdet)
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -190,15 +231,22 @@ def main() -> None:
                     "train/loss": loss.detach().float().item(),
                     "train/grad_norm": float(grad_norm),
                     "train/y_abs_mean": y.detach().abs().float().mean().item(),
-                    "train/logabsdet_mean": logabsdet.detach().float().mean().item(),
                 }
+                if micro_type == "categorical":
+                    logs["train/token_acc"] = token_acc.detach().float().item()
+                else:
+                    logs["train/logabsdet_mean"] = logabsdet.detach().float().mean().item()
                 accelerator.log(logs, step=step)
-                accelerator.print(
+                message = (
                     f"step={step} loss={logs['train/loss']:.6f} "
                     f"grad_norm={logs['train/grad_norm']:.4f} "
-                    f"y_abs_mean={logs['train/y_abs_mean']:.4f} "
-                    f"logabsdet_mean={logs['train/logabsdet_mean']:.4f}"
+                    f"y_abs_mean={logs['train/y_abs_mean']:.4f}"
                 )
+                if micro_type == "categorical":
+                    message += f" token_acc={logs['train/token_acc']:.4f}"
+                else:
+                    message += f" logabsdet_mean={logs['train/logabsdet_mean']:.4f}"
+                accelerator.print(message)
 
             if accelerator.is_main_process and step % checkpoint_every == 0:
                 save_checkpoint(
