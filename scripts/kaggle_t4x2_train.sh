@@ -45,6 +45,23 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
   "${PYTHON_BIN}" -m wandb login "${WANDB_API_KEY}"
 fi
 
+if [[ ! -d "${IMAGES_DIR}" ]]; then
+  cat >&2 <<EOF
+Input image directory not found: ${IMAGES_DIR}
+
+On Kaggle, add your CelebA/CelebA-HQ dataset to the notebook and set:
+  export IMAGES_DIR=/kaggle/input/<dataset-slug>/<optional-subdir>
+
+Examples:
+  export IMAGES_DIR=/kaggle/input/celeba-256
+  export IMAGES_DIR=/kaggle/input/celeba-dataset/img_align_celeba/img_align_celeba
+
+Mounted Kaggle inputs:
+EOF
+  find /kaggle/input -maxdepth 3 -type d 2>/dev/null | sed 's/^/  /' >&2 || true
+  exit 1
+fi
+
 export WANDB_PROJECT="${WANDB_PROJECT:-rama}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export TOKENIZERS_PARALLELISM=false
@@ -76,4 +93,3 @@ export TOKENIZERS_PARALLELISM=false
   --accelerate-num-processes 2 \
   --accelerate-mixed-precision fp16 \
   --enable-wandb
-

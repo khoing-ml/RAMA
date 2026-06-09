@@ -6,6 +6,13 @@ dataset:
 latents:
   output_dir: data/latents
 
+vae:
+  checkpoint_id: stabilityai/sd-vae-ft-mse
+  local_checkpoint: checkpoints/sd-vae-ft-mse
+  cache_dir: .cache/huggingface
+  dtype: fp16
+  device: cuda
+
 micro_latent:
   residual_shape: [4, 32, 32]
   patch_size: 2
@@ -91,3 +98,10 @@ logging:
   run_name: celeba256-sdvae-micro-rama
   log_every_steps: 100
   checkpoint_every_steps: 10000
+
+evaluation:
+  fid_every_steps: 10000
+  fid_num_samples: 1024
+  fid_batch_size: 32
+  temperature: 1.0
+  use_argmax: false

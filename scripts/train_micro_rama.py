@@ -14,11 +14,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
+from src.modules.latent_decomposition import reconstruct_from_decomposition
 from src.modules.latent_dataset import CachedMicroLatentDataset
 from src.micro.loss import categorical_micro_loss, continuous_micro_nll_loss
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
-from src.modules.micro_rama import build_context_encoder, build_micro_rama_net
-from src.modules.rama import make_orthogonal_bases, patchify
+from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
+from src.modules.rama import make_orthogonal_bases, patchify, unpatchify
+from src.modules.vae_utils import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 from src.rama.tokenizer import RAMATokenizer, build_tokenizer_from_config, load_tokenizer_config
 
@@ -35,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--micro-type", choices=("categorical", "continuous"), default=None)
     parser.add_argument("--tokenizer-config", default=None, help="Path to cache/rama_tokenizer_config.pt.")
     parser.add_argument("--bases", default=None, help="Override RAMA bases path.")
+    parser.add_argument("--fid-every", type=int, default=None, help="Override evaluation.fid_every_steps; <=0 disables FID.")
+    parser.add_argument("--fid-num-samples", type=int, default=None, help="Override evaluation.fid_num_samples.")
     parser.add_argument("--disable-wandb", action="store_true", help="Run without initializing Weights & Biases.")
     return parser.parse_args()
 
@@ -46,6 +51,13 @@ def load_config(path: str | Path) -> dict[str, object]:
 
 def checkpoint_path(out_dir: Path, step: int) -> Path:
     return out_dir / "checkpoints" / f"step_{step:08d}.pt"
+
+
+def resolve_vae_checkpoint(vae_cfg: dict[str, object]) -> str:
+    local_checkpoint = vae_cfg.get("local_checkpoint")
+    if local_checkpoint and Path(str(local_checkpoint)).exists():
+        return str(local_checkpoint)
+    return str(vae_cfg.get("checkpoint_id", "stabilityai/sd-vae-ft-mse"))
 
 
 def save_checkpoint(
@@ -67,6 +79,86 @@ def save_checkpoint(
         },
         path,
     )
+
+
+def sample_tokens(logits: torch.Tensor, temperature: float, use_argmax: bool) -> torch.Tensor:
+    if use_argmax:
+        return logits.argmax(dim=-1)
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    flat = probs.reshape(-1, probs.shape[-1])
+    return torch.multinomial(flat, num_samples=1).reshape(logits.shape[:-1])
+
+
+@torch.no_grad()
+def evaluate_micro_fid(
+    context_encoder: torch.nn.Module,
+    micro_model: torch.nn.Module,
+    dataset: CachedMicroLatentDataset,
+    vae: torch.nn.Module,
+    fid_model: InceptionFID,
+    projector: RAMAProjector,
+    tokenizer: RAMATokenizer | None,
+    micro_type: str,
+    num_samples: int,
+    batch_size: int,
+    patch_size: int,
+    temperature: float,
+    use_argmax: bool,
+    device: torch.device,
+) -> float:
+    context_was_training = context_encoder.training
+    micro_was_training = micro_model.training
+    context_encoder.eval()
+    micro_model.eval()
+    real_batches: list[torch.Tensor] = []
+    fake_batches: list[torch.Tensor] = []
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False)
+
+    remaining = num_samples
+    for batch in loader:
+        if remaining <= 0:
+            break
+        z_l = batch["z_L"][:remaining].to(device)
+        z_h = batch["z_H"][:remaining].to(device)
+        z_real = reconstruct_from_decomposition(z_l, z_h)
+        if micro_type == "categorical":
+            if tokenizer is None:
+                raise RuntimeError("categorical micro FID requires a RAMATokenizer")
+            context = context_encoder(z_l)
+            logits = micro_model(context)
+            tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+            y_hat = tokenizer.dequantize(tokens)
+            patches_hat = projector.inverse(y_hat)
+            z_h_hat = unpatchify(
+                patches_hat,
+                channels=z_h.shape[1],
+                height=z_h.shape[2],
+                width=z_h.shape[3],
+                patch_size=patch_size,
+            )
+        else:
+            z_h_hat = sample_micro_latent(
+                z_l,
+                context_encoder,
+                micro_model,
+                projector.bases,
+                latent_channels=z_h.shape[1],
+                latent_height=z_h.shape[2],
+                latent_width=z_h.shape[3],
+                patch_size=patch_size,
+            )
+        z_fake = reconstruct_from_decomposition(z_l, z_h_hat)
+        real_batches.append(fid_model(decode_latents(vae, z_real)))
+        fake_batches.append(fid_model(decode_latents(vae, z_fake)))
+        remaining -= z_l.shape[0]
+
+    if context_was_training:
+        context_encoder.train()
+    if micro_was_training:
+        micro_model.train()
+    return calculate_fid(stats_from_feature_batches(real_batches), stats_from_feature_batches(fake_batches))
 
 
 def load_or_make_bases(config: dict[str, object], override_path: str | None = None) -> torch.Tensor:
@@ -100,6 +192,7 @@ def main() -> None:
     config = load_config(args.config)
     training = config.get("training", {})
     logging_cfg = config.get("logging", {})
+    evaluation_cfg = config.get("evaluation", {})
     micro_latent_cfg = config.get("micro_latent", {})
     tokenizer_cfg = config.get("tokenizer", {})
 
@@ -182,6 +275,22 @@ def main() -> None:
     total_steps = args.max_steps or int(training.get("total_steps", 200000))
     log_every = int(logging_cfg.get("log_every_steps", 100))
     checkpoint_every = int(logging_cfg.get("checkpoint_every_steps", 10000))
+    fid_every = args.fid_every if args.fid_every is not None else int(evaluation_cfg.get("fid_every_steps", 0))
+    fid_num_samples = args.fid_num_samples or int(evaluation_cfg.get("fid_num_samples", 512))
+    fid_batch_size = int(evaluation_cfg.get("fid_batch_size", min(batch_size, 32)))
+    fid_temperature = float(evaluation_cfg.get("temperature", 1.0))
+    fid_use_argmax = bool(evaluation_cfg.get("use_argmax", False))
+    vae = None
+    fid_model = None
+    if accelerator.is_main_process and fid_every > 0:
+        vae_cfg = config.get("vae", {})
+        vae = load_sd_vae(
+            checkpoint=resolve_vae_checkpoint(vae_cfg),
+            cache_dir=str(vae_cfg.get("cache_dir", ".cache/huggingface")),
+            dtype=str(vae_cfg.get("dtype", "fp16")),
+            device=str(accelerator.device),
+        )
+        fid_model = InceptionFID(accelerator.device)
 
     step = start_step
     context_encoder.train()
@@ -247,6 +356,28 @@ def main() -> None:
                 else:
                     message += f" logabsdet_mean={logs['train/logabsdet_mean']:.4f}"
                 accelerator.print(message)
+
+            if accelerator.is_main_process and fid_every > 0 and step % fid_every == 0:
+                fid = evaluate_micro_fid(
+                    accelerator.unwrap_model(context_encoder),
+                    accelerator.unwrap_model(micro_model),
+                    dataset,
+                    vae,
+                    fid_model,
+                    projector,
+                    tokenizer,
+                    micro_type,
+                    num_samples=min(fid_num_samples, len(dataset)),
+                    batch_size=fid_batch_size,
+                    patch_size=patch_size,
+                    temperature=fid_temperature,
+                    use_argmax=fid_use_argmax,
+                    device=accelerator.device,
+                )
+                accelerator.log({"eval/fid_micro_real_zL": fid}, step=step)
+                accelerator.print(f"step={step} fid_micro_real_zL={fid:.4f}")
+                context_encoder.train()
+                micro_model.train()
 
             if accelerator.is_main_process and step % checkpoint_every == 0:
                 save_checkpoint(

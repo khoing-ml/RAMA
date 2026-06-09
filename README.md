@@ -74,7 +74,7 @@ For multi-GPU training, launch through Accelerate:
 accelerate launch scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml
 ```
 
-The trainer reads the `logging.tracker: wandb` block from the config and logs loss, velocity norms, gradient norm, and learning rate to Weights & Biases.
+The trainer reads the `logging.tracker: wandb` block from the config and logs loss, velocity norms, gradient norm, and learning rate to Weights & Biases. The `evaluation` block enables periodic FID during training; macro FID logs as `eval/fid_macro` and can be overridden with `--fid-every` and `--fid-num-samples`.
 
 ### Local 6GB Smoke Test
 
@@ -113,7 +113,7 @@ Start micro RAMA training:
 python scripts/train_micro_rama.py --config configs/celeba256_sdvae_micro.yaml
 ```
 
-The trainer creates frozen orthogonal RAMA bases at `cache/rama_bases_p256_d16.pt` if they do not already exist.
+The trainer creates frozen orthogonal RAMA bases at `cache/rama_bases_p256_d16.pt` if they do not already exist. The `evaluation` block enables periodic real-`z_L` micro FID during training and logs it as `eval/fid_micro_real_zL`.
 
 For a local smoke test, create synthetic full latents:
 

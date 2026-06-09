@@ -97,13 +97,22 @@ class ParquetImageDataset(Dataset):
 
 def build_image_dataset(root: str | Path, image_size: int) -> Dataset:
     root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(
+            f"input path does not exist: {root}\n"
+            "Pass --images with the directory containing image files or Parquet shards."
+        )
     image_paths = [path for path in root.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS]
     if image_paths:
         return ImagePathDataset(root, image_size=image_size)
     parquet_paths = list(root.rglob("*.parquet"))
     if parquet_paths:
         return ParquetImageDataset(root, image_size=image_size)
-    raise FileNotFoundError(f"no images or parquet shards found under {root}")
+    supported = ", ".join(sorted(IMAGE_EXTENSIONS)) + ", .parquet"
+    visible_files = [path for path in root.rglob("*") if path.is_file()]
+    sample = ", ".join(str(path.relative_to(root)) for path in visible_files[:8])
+    detail = f" Found files include: {sample}" if sample else " The directory contains no files."
+    raise FileNotFoundError(f"no supported images or parquet shards found under {root}. Expected: {supported}.{detail}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,13 +137,13 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset = build_image_dataset(args.images, image_size=args.image_size)
     vae = load_sd_vae(
         checkpoint=args.checkpoint,
         cache_dir=args.cache_dir,
         dtype=args.dtype,
         device=args.device,
     )
-    dataset = build_image_dataset(args.images, image_size=args.image_size)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,

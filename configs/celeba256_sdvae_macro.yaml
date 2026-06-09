@@ -54,3 +54,11 @@ logging:
   sample_every_steps: 5000
   checkpoint_every_steps: 10000
   watch_model: false
+
+evaluation:
+  fid_every_steps: 10000
+  fid_num_samples: 1024
+  fid_batch_size: 32
+  sampler: heun
+  sampler_steps: 50
+  full_latent_size: 32

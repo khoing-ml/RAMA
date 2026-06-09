@@ -30,3 +30,11 @@ logging:
   log_every_steps: 1
   checkpoint_every_steps: 10
   watch_model: false
+
+evaluation:
+  fid_every_steps: 0
+  fid_num_samples: 8
+  fid_batch_size: 2
+  sampler: heun
+  sampler_steps: 4
+  full_latent_size: 32
