@@ -44,6 +44,29 @@ from src.modules.vae_utils import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 
 
+def log_sample_grids(samples_dir: Path, joint_step: int, accelerator: Accelerator) -> None:
+    try:
+        import wandb
+    except ImportError:
+        accelerator.print("wandb is not installed; sample grids were saved but not logged")
+        return
+
+    step_dir = samples_dir / f"step_{joint_step:08d}"
+    image_paths = {
+        "samples/comparison_grid": step_dir / "comparison.png",
+        "samples/full_grid": step_dir / "full.png",
+        "samples/macro_grid": step_dir / "macro.png",
+        "samples/micro_grid": step_dir / "micro.png",
+    }
+    logs = {
+        name: wandb.Image(str(path), caption=f"{name} step {joint_step}")
+        for name, path in image_paths.items()
+        if path.exists()
+    }
+    if logs:
+        accelerator.log(logs, step=joint_step)
+
+
 @torch.no_grad()
 def evaluate_full_fid(
     macro_model: torch.nn.Module,
@@ -585,6 +608,8 @@ def main() -> None:
                     use_argmax=fid_use_argmax,
                     device=accelerator.device,
                 )
+                if tracker == "wandb":
+                    log_sample_grids(samples_dir, joint_step, accelerator)
                 accelerator.print(f"step={joint_step} saved samples to {samples_dir}")
             accelerator.wait_for_everyone()
 
