@@ -1,0 +1,59 @@
+dataset:
+  name: celeba256
+  root: data/celeba256
+  image_size: 256
+
+latents:
+  output_dir: data/latents
+
+micro_latent:
+  residual_shape: [4, 32, 32]
+  patch_size: 2
+  patch_grid: [16, 16]
+  num_patches: 256
+  patch_dim: 16
+
+rama_bases:
+  cache_path: cache/rama_bases_p256_d16.pt
+  num_patches: 256
+  patch_dim: 16
+  seed: 1234
+
+context_encoder:
+  in_channels: 4
+  context_dim: 256
+  hidden_channels: 128
+  num_layers: 3
+  positional_embedding: true
+  grid_size: [16, 16]
+  context_noise_sigma: 0.03
+
+micro_rama_net:
+  type: conditional_rq_nsf
+  context_dim: 256
+  patch_dim: 16
+  dim_emb_dim: 64
+  hidden_dim: 512
+  num_layers: 4
+  spline_bins: 16
+  tail_bound: 3.0
+
+training:
+  batch_size_per_gpu: 64
+  num_gpus: 2
+  gradient_accumulation_steps: 1
+  optimizer: AdamW
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 1.0e-4
+  precision: bf16
+  total_steps: 200000
+  grad_clip: 1.0
+
+logging:
+  tracker: wandb
+  project: rama
+  entity: null
+  run_name: celeba256-sdvae-micro-rama
+  log_every_steps: 100
+  checkpoint_every_steps: 10000

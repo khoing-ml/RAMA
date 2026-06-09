@@ -1,0 +1,32 @@
+dataset:
+  name: debug_latents
+
+latents:
+  output_dir: data/debug_latents
+
+macro_flow_model:
+  input_shape: [4, 16, 16]
+  base_channels: 32
+  channel_mult: [1, 2]
+  num_res_blocks: 1
+  attention_resolutions: [8]
+  time_embedding_dim: 64
+  objective: rectified_flow
+
+training:
+  batch_size_per_gpu: 2
+  gradient_accumulation_steps: 1
+  optimizer: AdamW
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-4
+  precision: fp16
+  ema: true
+  ema_decay: 0.999
+  total_steps: 10
+  grad_clip: 1.0
+
+logging:
+  tracker: null
+  log_every_steps: 1
+  checkpoint_every_steps: 10
+  watch_model: false

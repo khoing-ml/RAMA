@@ -1,0 +1,53 @@
+dataset:
+  name: debug_micro_latents
+
+latents:
+  output_dir: data/debug_micro_latents
+
+micro_latent:
+  residual_shape: [4, 32, 32]
+  patch_size: 2
+  patch_grid: [16, 16]
+  num_patches: 256
+  patch_dim: 16
+
+rama_bases:
+  cache_path: cache/rama_bases_p256_d16.pt
+  num_patches: 256
+  patch_dim: 16
+  seed: 1234
+
+context_encoder:
+  in_channels: 4
+  context_dim: 64
+  hidden_channels: 64
+  num_layers: 2
+  positional_embedding: true
+  grid_size: [16, 16]
+  context_noise_sigma: 0.0
+
+micro_rama_net:
+  type: conditional_rq_nsf
+  context_dim: 64
+  patch_dim: 16
+  dim_emb_dim: 32
+  hidden_dim: 128
+  num_layers: 2
+  spline_bins: 8
+  tail_bound: 3.0
+
+training:
+  batch_size_per_gpu: 2
+  gradient_accumulation_steps: 1
+  optimizer: AdamW
+  learning_rate: 2.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 1.0e-4
+  precision: fp16
+  total_steps: 10
+  grad_clip: 1.0
+
+logging:
+  tracker: null
+  log_every_steps: 1
+  checkpoint_every_steps: 10

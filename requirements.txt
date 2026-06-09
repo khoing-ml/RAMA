@@ -4,6 +4,7 @@ datasets
 huggingface_hub
 pillow
 pyyaml
+nflows
 safetensors
 torch
 torchvision
