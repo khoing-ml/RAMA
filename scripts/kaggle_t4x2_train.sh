@@ -77,25 +77,6 @@ ACCELERATE_NUM_PROCESSES="${ACCELERATE_NUM_PROCESSES:-2}"
 ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-fp16}"
 DISABLE_WANDB="${DISABLE_WANDB:-0}"
 
-extra_args=()
-
-add_bool_flag() {
-  local env_name="$1"
-  local flag="$2"
-  if [[ "${!env_name:-0}" == "1" ]]; then
-    extra_args+=("${flag}")
-  fi
-}
-
-add_bool_flag FORCE_CACHE --force-cache
-add_bool_flag SKIP_CACHE --skip-cache
-add_bool_flag SKIP_MACRO --skip-macro
-add_bool_flag SKIP_QUANT_RECONSTRUCTION --skip-quant-reconstruction
-add_bool_flag SKIP_MICRO --skip-micro
-add_bool_flag SKIP_SAMPLING --skip-sampling
-add_bool_flag SAMPLE_ARGMAX --sample-argmax
-add_bool_flag DRY_RUN --dry-run
-
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/kaggle_t4x2_train_${RUN_ID}.log}"
 mkdir -p "${LOG_DIR}"
@@ -168,7 +149,6 @@ SKIP_SAMPLING=${SKIP_SAMPLING:-0}
 SAMPLE_ARGMAX=${SAMPLE_ARGMAX:-0}
 DISABLE_WANDB=${DISABLE_WANDB}
 DRY_RUN=${DRY_RUN:-0}
-EXTRA_ARGS=${extra_args[*]:-}
 EOF
 
 print_file_if_exists "Macro YAML config" "${MACRO_CONFIG}"
@@ -328,7 +308,7 @@ if [[ "${SKIP_MACRO:-0}" != "1" && "${SKIP_MICRO:-0}" != "1" ]]; then
   )
   add_optional_cli_flag joint_args --disable-wandb "${DISABLE_WANDB:-0}"
   add_optional_cli_flag joint_args --sample-argmax "${SAMPLE_ARGMAX:-0}"
-  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
+  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}"
 elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
   macro_args=(
     --config "${MACRO_CONFIG}" \
@@ -341,7 +321,7 @@ elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
     --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag macro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
+  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}"
   echo "Skipping micro training"
 elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
   micro_args=(
@@ -358,7 +338,7 @@ elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
     --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag micro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}" "${extra_args[@]:+"${extra_args[@]}"}"
+  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}"
   echo "Skipping macro training"
 else
   echo "Skipping macro training"
