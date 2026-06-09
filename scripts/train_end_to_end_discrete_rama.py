@@ -176,25 +176,6 @@ def main() -> None:
     else:
         print(f"Skipping latent cache; found cached latents under {args.latents}")
 
-    if not args.skip_macro:
-        command = train_command(
-            "scripts/train_macro_flow.py",
-            args.use_accelerate,
-            args.accelerate_num_processes,
-            args.accelerate_mixed_precision,
-        )
-        command.extend(["--config", args.macro_config, "--latents", args.latents, "--out", args.macro_out])
-        command.extend(["--num-workers", str(args.train_num_workers)])
-        add_optional(command, "--batch-size", args.macro_batch_size)
-        add_optional(command, "--max-steps", args.macro_max_steps)
-        add_optional(command, "--fid-every", args.macro_fid_every)
-        add_optional(command, "--fid-num-samples", args.macro_fid_num_samples)
-        if args.disable_wandb:
-            command.append("--disable-wandb")
-        run(command, args.dry_run)
-    else:
-        print("Skipping macro training")
-
     command = [
         sys.executable,
         "scripts/estimate_quant_bound.py",
@@ -242,7 +223,64 @@ def main() -> None:
     else:
         print("Skipping quantization reconstruction")
 
-    if not args.skip_micro:
+    if not args.skip_macro and not args.skip_micro:
+        command = train_command(
+            "scripts/train_joint_macro_micro.py",
+            args.use_accelerate,
+            args.accelerate_num_processes,
+            args.accelerate_mixed_precision,
+        )
+        command.extend(
+            [
+                "--macro-config",
+                args.macro_config,
+                "--micro-config",
+                args.micro_config,
+                "--latents",
+                args.latents,
+                "--macro-out",
+                args.macro_out,
+                "--micro-out",
+                args.micro_out,
+                "--micro-type",
+                "categorical",
+                "--tokenizer-config",
+                args.tokenizer_config,
+                "--bases",
+                args.bases,
+                "--num-workers",
+                str(args.train_num_workers),
+            ]
+        )
+        add_optional(command, "--macro-batch-size", args.macro_batch_size)
+        add_optional(command, "--micro-batch-size", args.micro_batch_size)
+        add_optional(command, "--macro-max-steps", args.macro_max_steps)
+        add_optional(command, "--micro-max-steps", args.micro_max_steps)
+        add_optional(command, "--macro-fid-every", args.macro_fid_every)
+        add_optional(command, "--micro-fid-every", args.micro_fid_every)
+        add_optional(command, "--macro-fid-num-samples", args.macro_fid_num_samples)
+        add_optional(command, "--micro-fid-num-samples", args.micro_fid_num_samples)
+        if args.disable_wandb:
+            command.append("--disable-wandb")
+        run(command, args.dry_run)
+    elif not args.skip_macro:
+        command = train_command(
+            "scripts/train_macro_flow.py",
+            args.use_accelerate,
+            args.accelerate_num_processes,
+            args.accelerate_mixed_precision,
+        )
+        command.extend(["--config", args.macro_config, "--latents", args.latents, "--out", args.macro_out])
+        command.extend(["--num-workers", str(args.train_num_workers)])
+        add_optional(command, "--batch-size", args.macro_batch_size)
+        add_optional(command, "--max-steps", args.macro_max_steps)
+        add_optional(command, "--fid-every", args.macro_fid_every)
+        add_optional(command, "--fid-num-samples", args.macro_fid_num_samples)
+        if args.disable_wandb:
+            command.append("--disable-wandb")
+        run(command, args.dry_run)
+        print("Skipping micro training")
+    elif not args.skip_micro:
         command = train_command(
             "scripts/train_micro_rama.py",
             args.use_accelerate,
@@ -275,6 +313,7 @@ def main() -> None:
             command.append("--disable-wandb")
         run(command, args.dry_run)
     else:
+        print("Skipping macro training")
         print("Skipping micro training")
 
     if args.skip_sampling:

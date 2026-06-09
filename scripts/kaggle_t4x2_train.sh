@@ -38,6 +38,7 @@ set -euo pipefail
 #   SKIP_QUANT_RECONSTRUCTION=1
 #   SKIP_MICRO=1
 #   SKIP_SAMPLING=1
+#   DISABLE_WANDB=1
 #   DRY_RUN=1
 #   SKIP_INSTALL=1
 
@@ -80,6 +81,7 @@ SAMPLER="${SAMPLER:-heun}"
 SAMPLE_TEMPERATURE="${SAMPLE_TEMPERATURE:-1.0}"
 ACCELERATE_NUM_PROCESSES="${ACCELERATE_NUM_PROCESSES:-2}"
 ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-fp16}"
+DISABLE_WANDB="${DISABLE_WANDB:-0}"
 
 extra_args=()
 
@@ -172,6 +174,7 @@ SKIP_QUANT_RECONSTRUCTION=${SKIP_QUANT_RECONSTRUCTION:-0}
 SKIP_MICRO=${SKIP_MICRO:-0}
 SKIP_SAMPLING=${SKIP_SAMPLING:-0}
 SAMPLE_ARGMAX=${SAMPLE_ARGMAX:-0}
+DISABLE_WANDB=${DISABLE_WANDB}
 DRY_RUN=${DRY_RUN:-0}
 EXTRA_ARGS=${extra_args[*]:-}
 EOF
@@ -208,41 +211,220 @@ export WANDB_PROJECT="${WANDB_PROJECT:-rama}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"
 export TOKENIZERS_PARALLELISM=false
 
-"${PYTHON_BIN}" scripts/train_end_to_end_discrete_rama.py \
-  --images "${IMAGES_DIR}" \
-  --latents "${LATENTS_DIR}" \
+run_command() {
+  echo
+  echo "\$ $*"
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    return
+  fi
+  "$@"
+}
+
+train_with_accelerate() {
+  local script="$1"
+  shift
+  local command=(accelerate launch)
+  if [[ -n "${ACCELERATE_NUM_PROCESSES:-}" ]]; then
+    if (( ACCELERATE_NUM_PROCESSES > 1 )); then
+      command+=(--multi_gpu)
+    fi
+    command+=(--num_processes "${ACCELERATE_NUM_PROCESSES}")
+  fi
+  if [[ -n "${ACCELERATE_MIXED_PRECISION:-}" ]]; then
+    command+=(--mixed_precision "${ACCELERATE_MIXED_PRECISION}")
+  fi
+  command+=("${script}" "$@")
+  run_command "${command[@]}"
+}
+
+add_optional_cli_flag() {
+  local -n args_ref="$1"
+  local flag="$2"
+  local enabled="${3:-0}"
+  if [[ "${enabled}" == "1" ]]; then
+    args_ref+=("${flag}")
+  fi
+}
+
+resolve_checkpoint_path() {
+  local out_dir="$1"
+  local step="$2"
+  local expected="${out_dir}/checkpoints/step_$(printf '%08d' "${step}").pt"
+  if [[ -f "${expected}" ]]; then
+    printf '%s\n' "${expected}"
+    return
+  fi
+  find "${out_dir}/checkpoints" -maxdepth 1 -type f -name 'step_*.pt' 2>/dev/null | sort | tail -n 1
+}
+
+if [[ "${SKIP_CACHE:-0}" != "1" ]]; then
+  run_command "${PYTHON_BIN}" scripts/cache_sdvae_latents.py \
+    --images "${IMAGES_DIR}" \
+    --out "${LATENTS_DIR}" \
+    --checkpoint "${VAE_CHECKPOINT}" \
+    --cache-dir "${HF_CACHE_DIR}" \
+    --batch-size "${CACHE_BATCH}" \
+    --num-workers "${TRAIN_WORKERS}" \
+    --image-size "${IMAGE_SIZE}" \
+    --dtype "${DTYPE}" \
+    --device "${DEVICE}" \
+    --store-components
+else
+  echo "Skipping latent cache; using cached latents under ${LATENTS_DIR}"
+fi
+
+run_command "${PYTHON_BIN}" scripts/estimate_quant_bound.py \
+  --latent-cache "${LATENTS_DIR}" \
+  --bases "${BASES_PATH}" \
+  --output "${TOKENIZER_CONFIG}" \
+  --num-bins "${NUM_BINS}" \
+  --percentile "${QUANT_PERCENTILE}" \
+  --max-batches "${QUANT_MAX_BATCHES}" \
+  --batch-size "${QUANT_BATCH}" \
+  --device "${DEVICE}"
+
+if [[ "${SKIP_QUANT_RECONSTRUCTION:-0}" != "1" ]]; then
+  run_command "${PYTHON_BIN}" scripts/test_quant_reconstruction.py \
+    --latent-cache "${LATENTS_DIR}" \
+    --bases "${BASES_PATH}" \
+    --tokenizer-config "${TOKENIZER_CONFIG}" \
+    --out outputs/quantization_tests/vae_vs_macro_vs_quant.png \
+    --checkpoint "${VAE_CHECKPOINT}" \
+    --cache-dir "${HF_CACHE_DIR}" \
+    --dtype "${DTYPE}" \
+    --device "${DEVICE}"
+else
+  echo "Skipping quantization reconstruction"
+fi
+
+if [[ "${SKIP_MACRO:-0}" != "1" && "${SKIP_MICRO:-0}" != "1" ]]; then
+  joint_args=(
+    --macro-config "${MACRO_CONFIG}" \
+    --micro-config "${MICRO_CONFIG}" \
+    --latents "${LATENTS_DIR}" \
+    --macro-out "${MACRO_OUT}" \
+    --micro-out "${MICRO_OUT}" \
+    --micro-type categorical \
+    --tokenizer-config "${TOKENIZER_CONFIG}" \
+    --bases "${BASES_PATH}" \
+    --num-workers "${TRAIN_WORKERS}" \
+    --macro-batch-size "${MACRO_BATCH}" \
+    --micro-batch-size "${MICRO_BATCH}" \
+    --macro-max-steps "${MACRO_STEPS}" \
+    --micro-max-steps "${MICRO_STEPS}" \
+    --macro-fid-every "${MACRO_FID_EVERY}" \
+    --micro-fid-every "${MICRO_FID_EVERY}" \
+    --macro-fid-num-samples "${MACRO_FID_NUM_SAMPLES}" \
+    --micro-fid-num-samples "${MICRO_FID_NUM_SAMPLES}"
+  )
+  add_optional_cli_flag joint_args --disable-wandb "${DISABLE_WANDB:-0}"
+  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}"
+elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
+  macro_args=(
+    --config "${MACRO_CONFIG}" \
+    --latents "${LATENTS_DIR}" \
+    --out "${MACRO_OUT}" \
+    --num-workers "${TRAIN_WORKERS}" \
+    --batch-size "${MACRO_BATCH}" \
+    --max-steps "${MACRO_STEPS}" \
+    --fid-every "${MACRO_FID_EVERY}" \
+    --fid-num-samples "${MACRO_FID_NUM_SAMPLES}"
+  )
+  add_optional_cli_flag macro_args --disable-wandb "${DISABLE_WANDB:-0}"
+  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}"
+  echo "Skipping micro training"
+elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
+  micro_args=(
+    --config "${MICRO_CONFIG}" \
+    --latents "${LATENTS_DIR}" \
+    --out "${MICRO_OUT}" \
+    --micro-type categorical \
+    --tokenizer-config "${TOKENIZER_CONFIG}" \
+    --bases "${BASES_PATH}" \
+    --num-workers "${TRAIN_WORKERS}" \
+    --batch-size "${MICRO_BATCH}" \
+    --max-steps "${MICRO_STEPS}" \
+    --fid-every "${MICRO_FID_EVERY}" \
+    --fid-num-samples "${MICRO_FID_NUM_SAMPLES}"
+  )
+  add_optional_cli_flag micro_args --disable-wandb "${DISABLE_WANDB:-0}"
+  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}"
+  echo "Skipping macro training"
+else
+  echo "Skipping macro training"
+  echo "Skipping micro training"
+fi
+
+if [[ "${SKIP_SAMPLING:-0}" == "1" ]]; then
+  echo "Skipping sampling"
+  exit 0
+fi
+
+macro_checkpoint="$(resolve_checkpoint_path "${MACRO_OUT}" "${MACRO_STEPS}")"
+micro_checkpoint="$(resolve_checkpoint_path "${MICRO_OUT}" "${MICRO_STEPS}")"
+
+if [[ -z "${macro_checkpoint}" || -z "${micro_checkpoint}" ]]; then
+  echo "Could not resolve macro or micro checkpoint for sampling" >&2
+  exit 1
+fi
+
+run_command "${PYTHON_BIN}" scripts/sample_macro_flow.py \
+  --checkpoint "${macro_checkpoint}" \
+  --out outputs/macro_samples/macro_only_samples.png \
+  --num-samples "${SAMPLE_COUNT}" \
+  --sampler "${SAMPLER}" \
+  --steps "${SAMPLE_STEPS}" \
   --vae-checkpoint "${VAE_CHECKPOINT}" \
-  --hf-cache-dir "${HF_CACHE_DIR}" \
-  --image-size "${IMAGE_SIZE}" \
+  --cache-dir "${HF_CACHE_DIR}" \
   --dtype "${DTYPE}" \
-  --device "${DEVICE}" \
-  --macro-config "${MACRO_CONFIG}" \
-  --micro-config "${MICRO_CONFIG}" \
-  --macro-out "${MACRO_OUT}" \
-  --micro-out "${MICRO_OUT}" \
+  --device "${DEVICE}"
+
+run_command "${PYTHON_BIN}" scripts/reconstruct_micro_real_zl.py \
+  --micro-checkpoint "${micro_checkpoint}" \
+  --latent-cache "${LATENTS_DIR}" \
   --bases "${BASES_PATH}" \
   --tokenizer-config "${TOKENIZER_CONFIG}" \
-  --cache-batch-size "${CACHE_BATCH}" \
-  --cache-num-workers "${TRAIN_WORKERS}" \
-  --macro-batch-size "${MACRO_BATCH}" \
-  --micro-batch-size "${MICRO_BATCH}" \
-  --train-num-workers "${TRAIN_WORKERS}" \
-  --macro-max-steps "${MACRO_STEPS}" \
-  --micro-max-steps "${MICRO_STEPS}" \
-  --macro-fid-every "${MACRO_FID_EVERY}" \
-  --micro-fid-every "${MICRO_FID_EVERY}" \
-  --macro-fid-num-samples "${MACRO_FID_NUM_SAMPLES}" \
-  --micro-fid-num-samples "${MICRO_FID_NUM_SAMPLES}" \
-  --quant-batch-size "${QUANT_BATCH}" \
-  --quant-max-batches "${QUANT_MAX_BATCHES}" \
-  --quant-percentile "${QUANT_PERCENTILE}" \
-  --num-bins "${NUM_BINS}" \
-  --sample-num-samples "${SAMPLE_COUNT}" \
-  --sample-steps "${SAMPLE_STEPS}" \
-  --sampler "${SAMPLER}" \
-  --sample-temperature "${SAMPLE_TEMPERATURE}" \
-  --use-accelerate \
-  --accelerate-num-processes "${ACCELERATE_NUM_PROCESSES}" \
-  --accelerate-mixed-precision "${ACCELERATE_MIXED_PRECISION}" \
-  --enable-wandb \
-  "${extra_args[@]}"
+  --out outputs/micro_reconstructions/real_zL_macro_vs_micro_argmax.png \
+  --vae-checkpoint "${VAE_CHECKPOINT}" \
+  --cache-dir "${HF_CACHE_DIR}" \
+  --dtype "${DTYPE}" \
+  --device "${DEVICE}"
+
+if [[ "${SAMPLE_ARGMAX:-0}" == "1" ]]; then
+  run_command "${PYTHON_BIN}" scripts/sample_full_model.py \
+    --macro-checkpoint "${macro_checkpoint}" \
+    --micro-checkpoint "${micro_checkpoint}" \
+    --bases "${BASES_PATH}" \
+    --tokenizer-config "${TOKENIZER_CONFIG}" \
+    --out outputs/full_samples/generated_zL_macro_plus_micro.png \
+    --macro-out outputs/full_samples/generated_zL_macro_only.png \
+    --micro-out outputs/full_samples/generated_zL_micro_only.png \
+    --comparison-out outputs/full_samples/generated_zL_macro_micro_full.png \
+    --num-samples "${SAMPLE_COUNT}" \
+    --sampler "${SAMPLER}" \
+    --steps "${SAMPLE_STEPS}" \
+    --temperature "${SAMPLE_TEMPERATURE}" \
+    --vae-checkpoint "${VAE_CHECKPOINT}" \
+    --cache-dir "${HF_CACHE_DIR}" \
+    --dtype "${DTYPE}" \
+    --device "${DEVICE}" \
+    --use-argmax
+else
+  run_command "${PYTHON_BIN}" scripts/sample_full_model.py \
+    --macro-checkpoint "${macro_checkpoint}" \
+    --micro-checkpoint "${micro_checkpoint}" \
+    --bases "${BASES_PATH}" \
+    --tokenizer-config "${TOKENIZER_CONFIG}" \
+    --out outputs/full_samples/generated_zL_macro_plus_micro.png \
+    --macro-out outputs/full_samples/generated_zL_macro_only.png \
+    --micro-out outputs/full_samples/generated_zL_micro_only.png \
+    --comparison-out outputs/full_samples/generated_zL_macro_micro_full.png \
+    --num-samples "${SAMPLE_COUNT}" \
+    --sampler "${SAMPLER}" \
+    --steps "${SAMPLE_STEPS}" \
+    --temperature "${SAMPLE_TEMPERATURE}" \
+    --vae-checkpoint "${VAE_CHECKPOINT}" \
+    --cache-dir "${HF_CACHE_DIR}" \
+    --dtype "${DTYPE}" \
+    --device "${DEVICE}"
+fi
