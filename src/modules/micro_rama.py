@@ -12,6 +12,43 @@ except ImportError:  # pragma: no cover - exercised only when optional dependenc
     unconstrained_rational_quadratic_spline = None
 
 
+class ContextFeedForwardBlock(nn.Module):
+    """Feed-forward block used by the tiny ViT context encoder."""
+
+    def __init__(self, dim: int, mlp_ratio: int = 4, dropout: float = 0.0) -> None:
+        super().__init__()
+        hidden_dim = dim * mlp_ratio
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+class ContextTransformerBlock(nn.Module):
+    """Pre-norm transformer block for context tokens."""
+
+    def __init__(self, dim: int, num_heads: int = 4, mlp_ratio: int = 4, dropout: float = 0.0) -> None:
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
+        self.norm = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.ff = ContextFeedForwardBlock(dim, mlp_ratio=mlp_ratio, dropout=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = self.norm(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
+        return self.ff(x + self.dropout(attn_out))
+
+
 class ContextEncoder(nn.Module):
     """Encode macro latents into one context vector per residual patch."""
 
@@ -23,10 +60,43 @@ class ContextEncoder(nn.Module):
         num_layers: int = 3,
         use_position_embedding: bool = True,
         grid_size: tuple[int, int] = (16, 16),
+        architecture: str = "conv",
+        vit_layers: int = 4,
+        vit_heads: int = 4,
+        vit_mlp_ratio: int = 4,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
+        if vit_layers < 1:
+            raise ValueError("vit_layers must be at least 1")
+        architecture = {"cnn": "conv", "tiny_vit": "vit", "transformer": "vit"}.get(architecture, architecture)
+        if architecture not in {"conv", "vit"}:
+            raise ValueError(f"unsupported context encoder architecture: {architecture}")
+        self.architecture = architecture
+        self.context_dim = context_dim
+        self.grid_size = grid_size
+        self.position_embedding = (
+            nn.Parameter(torch.zeros(1, grid_size[0] * grid_size[1], context_dim)) if use_position_embedding else None
+        )
+
+        if architecture == "vit":
+            self.input_proj = nn.Conv2d(in_channels, context_dim, kernel_size=1)
+            self.transformer_blocks = nn.Sequential(
+                *[
+                    ContextTransformerBlock(
+                        context_dim,
+                        num_heads=vit_heads,
+                        mlp_ratio=vit_mlp_ratio,
+                        dropout=dropout,
+                    )
+                    for _ in range(vit_layers)
+                ]
+            )
+            self.output_norm = nn.LayerNorm(context_dim)
+            return
+
         layers: list[nn.Module] = []
         channels = in_channels
         for _ in range(num_layers - 1):
@@ -40,22 +110,22 @@ class ContextEncoder(nn.Module):
             channels = hidden_channels
         layers.append(nn.Conv2d(channels, context_dim, kernel_size=3, padding=1))
         self.net = nn.Sequential(*layers)
-        self.context_dim = context_dim
-        self.grid_size = grid_size
-        self.position_embedding = (
-            nn.Parameter(torch.zeros(1, grid_size[0] * grid_size[1], context_dim)) if use_position_embedding else None
-        )
 
     def forward(self, z_l: torch.Tensor) -> torch.Tensor:
         if z_l.ndim != 4:
             raise ValueError(f"expected z_L shape [B, C, H, W], got {tuple(z_l.shape)}")
-        context = self.net(z_l).flatten(2).transpose(1, 2)
+        if self.architecture == "vit":
+            context = self.input_proj(z_l).flatten(2).transpose(1, 2)
+        else:
+            context = self.net(z_l).flatten(2).transpose(1, 2)
         if self.position_embedding is not None:
             if context.shape[1] != self.position_embedding.shape[1]:
                 raise ValueError(
                     f"expected {self.position_embedding.shape[1]} context positions, got {context.shape[1]}"
                 )
             context = context + self.position_embedding
+        if self.architecture == "vit":
+            context = self.output_norm(self.transformer_blocks(context))
         return context
 
 
@@ -163,6 +233,11 @@ def build_context_encoder(config: dict[str, object]) -> ContextEncoder:
         num_layers=int(config.get("num_layers", 3)),
         use_position_embedding=bool(config.get("positional_embedding", True)),
         grid_size=(int(grid[0]), int(grid[1])),
+        architecture=str(config.get("architecture", "conv")),
+        vit_layers=int(config.get("vit_layers", 4)),
+        vit_heads=int(config.get("vit_heads", 4)),
+        vit_mlp_ratio=int(config.get("vit_mlp_ratio", 4)),
+        dropout=float(config.get("dropout", 0.0)),
     )
 
 

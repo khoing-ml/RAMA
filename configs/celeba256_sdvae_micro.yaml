@@ -40,31 +40,48 @@ tokenizer:
   percentile: 99.5
 
 context_encoder:
+  architecture: vit
   in_channels: 4
   context_dim: 256
   hidden_channels: 128
   num_layers: 3
+  vit_layers: 4
+  vit_heads: 4
+  vit_mlp_ratio: 4
+  dropout: 0.05
   positional_embedding: true
   grid_size: [16, 16]
-  context_noise_sigma: 0.03
+  context_noise_sigma: 0.0
 
 micro:
   type: categorical
+  architecture: transformer
   context_dim: 256
   patch_dim: 16
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4
+  transformer_dim: 512
+  spatial_layers: 3
+  coord_layers: 2
+  num_heads: 8
+  dropout: 0.05
   num_bins: 256
   loss: cross_entropy
 
 micro_rama_net:
   type: categorical
+  architecture: transformer
   context_dim: 256
   patch_dim: 16
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4
+  transformer_dim: 512
+  spatial_layers: 3
+  coord_layers: 2
+  num_heads: 8
+  dropout: 0.05
   num_bins: 256
 
 micro_continuous:
