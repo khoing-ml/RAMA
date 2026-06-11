@@ -36,6 +36,7 @@ set -euo pipefail
 #   SKIP_MICRO=1
 #   SKIP_SAMPLING=1
 #   DISABLE_WANDB=1
+#   ACCELERATE_NUM_PROCESSES=1
 #   DRY_RUN=1
 #   SKIP_INSTALL=1
 
@@ -73,9 +74,32 @@ SAMPLE_COUNT="${SAMPLE_COUNT:-16}"
 SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
 SAMPLER="${SAMPLER:-heun}"
 SAMPLE_TEMPERATURE="${SAMPLE_TEMPERATURE:-1.0}"
-ACCELERATE_NUM_PROCESSES="${ACCELERATE_NUM_PROCESSES:-2}"
 ACCELERATE_MIXED_PRECISION="${ACCELERATE_MIXED_PRECISION:-fp16}"
 DISABLE_WANDB="${DISABLE_WANDB:-0}"
+
+detect_cuda_device_count() {
+  "${PYTHON_BIN}" - <<'PY' 2>/dev/null || true
+try:
+    import torch
+except Exception:
+    print(0)
+else:
+    print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+PY
+}
+
+if [[ -z "${ACCELERATE_NUM_PROCESSES:-}" ]]; then
+  if [[ "${DEVICE}" == cuda* ]]; then
+    visible_cuda_devices="$(detect_cuda_device_count)"
+    if [[ "${visible_cuda_devices}" =~ ^[0-9]+$ && "${visible_cuda_devices}" -gt 0 ]]; then
+      ACCELERATE_NUM_PROCESSES="${visible_cuda_devices}"
+    else
+      ACCELERATE_NUM_PROCESSES=1
+    fi
+  else
+    ACCELERATE_NUM_PROCESSES=1
+  fi
+fi
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/kaggle_t4x2_train_${RUN_ID}.log}"
