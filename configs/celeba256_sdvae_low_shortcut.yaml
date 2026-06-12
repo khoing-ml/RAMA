@@ -51,7 +51,7 @@ training:
   optimizer: AdamW
   learning_rate: 2.0e-4
   weight_decay: 1.0e-4
-  precision: fp16
+  precision: bf16
   ema: true
   ema_decay: 0.9999
   total_steps: 401000
@@ -68,8 +68,8 @@ logging:
 
 evaluation:
   fid_every_steps: 10000
-  fid_num_samples: 1024
-  fid_batch_size: 32
+  fid_num_samples: 50000
+  fid_batch_size: 64
   sampler: shortcut
   sampler_steps: 16
   full_latent_size: 32
