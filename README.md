@@ -1,6 +1,44 @@
 # RAMA
 
-Latent-RAMA experiments for SD-VAE latents and flow matching.
+Latent-RAMA experiments for SD-VAE latents, macro flow matching, and RAMA-based micro residual modeling.
+
+The core idea is to model a frozen autoencoder latent as:
+
+```text
+p(z) ~= p(z_L) p(z_H | z_L)
+```
+
+where `z_L` is a low-frequency macro latent and `z_H` is a high-frequency residual latent. The macro model handles global structure, while the micro RAMA model handles local residual detail.
+
+## Documentation Map
+
+Start here if you want to reuse this idea in another architecture or repo:
+
+- [Project summary](docs/project_summary.md): short explanation of the idea and current repo.
+- [Portable architecture guide](docs/portable_architecture_guide.md): how to adapt Latent-RAMA to other latent spaces and model families.
+- [Reimplementation checklist](docs/reimplementation_checklist.md): staged checklist for rebuilding the pattern safely.
+
+Detailed implementation notes:
+
+- [SD-VAE setup](docs/sdvae.md)
+- [Macro flow matching setup](docs/flow_matching_model_setup.md)
+- [Micro-latent RAMA setup](docs/micro_latent_rama_setup.md)
+- [Architecture integration notes](docs/architecture_sota_integration_update.md)
+- [Discrete RAMA implementation guide](docs/discrete_rama_implementation_gap_guide.md)
+- [Agent implementation notes](docs/AGENTS.md)
+
+## Code Layout
+
+- `src/macro/`: low-frequency macro models, shortcut/flow losses, and macro samplers.
+- `src/data/`: latent decomposition, cached latent datasets, and SD-VAE helpers.
+- `src/micro/` and `src/rama/`: high-frequency RAMA models, tokenizer, and projector.
+- `src/modules/`: compatibility wrappers plus shared utilities that have not moved.
+- `scripts/data/`: latent caching and frequency splitting.
+- `scripts/train/`: macro, micro, joint, and end-to-end training entrypoints.
+- `scripts/sample/`: macro/full sampling and reconstruction entrypoints.
+- `scripts/dev/`: smoke checks, quantization checks, and debugging utilities.
+
+Top-level `scripts/*.py` files are thin compatibility wrappers for the grouped entrypoints.
 
 The first runnable milestone is a Stable Diffusion VAE sanity check:
 
@@ -43,7 +81,7 @@ hf auth login
 Put a test image at `data/celeba256/example.jpg`, or pass another path:
 
 ```bash
-python scripts/check_sdvae.py --image data/celeba256/example.jpg --checkpoint checkpoints/sd-vae-ft-mse --out outputs/sdvae_check
+python scripts/dev/check_sdvae.py --image data/celeba256/example.jpg --checkpoint checkpoints/sd-vae-ft-mse --out outputs/sdvae_check
 ```
 
 The script writes:
@@ -59,19 +97,41 @@ The script writes:
 Cache SD-VAE latents before training:
 
 ```bash
-python scripts/cache_sdvae_latents.py --images data/celeba256 --out data/latents --checkpoint checkpoints/sd-vae-ft-mse --store-components
+python scripts/data/cache_sdvae_latents.py --images data/celeba256 --out data/latents --checkpoint checkpoints/sd-vae-ft-mse --store-components
+```
+
+To train separate low- and high-frequency models, split the cached latent root into two dataset roots:
+
+```bash
+python scripts/data/split_latent_frequencies.py --latents data/latents --low-out data/latents_low --high-out data/latents_high
+```
+
+The low-frequency dataset stores `z_L` for the shortcut macro model. The high-frequency dataset stores both `z_H` and its conditioning `z_L` for RAMA.
+
+Train the low-frequency shortcut model:
+
+```bash
+python scripts/train/macro_flow.py --config configs/celeba256_sdvae_low_shortcut.yaml --out outputs/low_shortcut
+```
+
+The shortcut config uses a DiT-B/2 latent transformer over the 16x16 `z_L` grid.
+
+Shortcut sampling supports power-of-two step counts, including one-step generation:
+
+```bash
+python scripts/sample/macro_flow.py --checkpoint outputs/low_shortcut/checkpoints/step_00200000.pt --sampler shortcut --steps 1
 ```
 
 Start a single-process training run:
 
 ```bash
-python scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml
+python scripts/train/macro_flow.py --config configs/celeba256_sdvae_macro.yaml
 ```
 
 For multi-GPU training, launch through Accelerate:
 
 ```bash
-accelerate launch scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml
+accelerate launch scripts/train/macro_flow.py --config configs/celeba256_sdvae_macro.yaml
 ```
 
 The trainer reads the `logging.tracker: wandb` block from the config and logs loss, velocity norms, gradient norm, and learning rate to Weights & Biases. The `evaluation` block enables periodic FID during training; macro FID logs as `eval/fid_macro` and can be overridden with `--fid-every` and `--fid-num-samples`.
@@ -90,13 +150,13 @@ mkdir -p data/debug_latents
 Run the lightweight smoke test:
 
 ```bash
-.venv/bin/python scripts/train_macro_flow.py --config configs/debug_6gb_macro.yaml --out outputs/debug_macro_flow --disable-wandb --num-workers 0 --max-steps 10
+.venv/bin/python scripts/train/macro_flow.py --config configs/debug_6gb_macro.yaml --out outputs/debug_macro_flow --disable-wandb --num-workers 0 --max-steps 10
 ```
 
 For a closer check against the production model shape, run the full config at batch size 1:
 
 ```bash
-.venv/bin/python scripts/train_macro_flow.py --config configs/celeba256_sdvae_macro.yaml --latents data/debug_latents --out outputs/debug_macro_flow_full --disable-wandb --num-workers 0 --batch-size 1 --max-steps 2
+.venv/bin/python scripts/train/macro_flow.py --config configs/celeba256_sdvae_macro.yaml --latents data/debug_latents --out outputs/debug_macro_flow_full --disable-wandb --num-workers 0 --batch-size 1 --max-steps 2
 ```
 
 ## Micro RAMA Training
@@ -104,13 +164,19 @@ For a closer check against the production model shape, run the full config at ba
 Cache full SD-VAE latents or store decomposition components:
 
 ```bash
-python scripts/cache_sdvae_latents.py --images data/celeba256 --out data/latents --checkpoint checkpoints/sd-vae-ft-mse --store-components
+python scripts/data/cache_sdvae_latents.py --images data/celeba256 --out data/latents --checkpoint checkpoints/sd-vae-ft-mse --store-components
 ```
 
 Start micro RAMA training:
 
 ```bash
-python scripts/train_micro_rama.py --config configs/celeba256_sdvae_micro.yaml
+python scripts/train/micro_rama.py --config configs/celeba256_sdvae_micro.yaml
+```
+
+For the split high-frequency dataset, use:
+
+```bash
+python scripts/train/micro_rama.py --config configs/celeba256_sdvae_high_rama.yaml --out outputs/high_rama
 ```
 
 The trainer creates frozen orthogonal RAMA bases at `cache/rama_bases_p256_d16.pt` if they do not already exist. The `evaluation` block enables periodic real-`z_L` micro FID during training and logs it as `eval/fid_micro_real_zL`.
@@ -118,13 +184,13 @@ The trainer creates frozen orthogonal RAMA bases at `cache/rama_bases_p256_d16.p
 The default config trains the discrete categorical RAMA variant. To match the continuous spline-flow form in the localized RAMA algorithm, train with:
 
 ```bash
-python scripts/train_micro_rama.py --config configs/celeba256_sdvae_micro.yaml --micro-type continuous
+python scripts/train/micro_rama.py --config configs/celeba256_sdvae_micro.yaml --micro-type continuous
 ```
 
 Full-model sampling now supports both variants. It auto-detects the micro checkpoint type from config, or you can force it:
 
 ```bash
-python scripts/sample_full_model.py --macro-checkpoint outputs/macro_flow/checkpoints/step_00200000.pt --micro-checkpoint outputs/micro_rama/checkpoints/step_00200000.pt --micro-type continuous --noise-scale 1.0
+python scripts/sample/full_model.py --macro-checkpoint outputs/macro_flow/checkpoints/step_00200000.pt --micro-checkpoint outputs/micro_rama/checkpoints/step_00200000.pt --micro-type continuous --noise-scale 1.0
 ```
 
 For a local smoke test, create synthetic full latents:
@@ -137,5 +203,5 @@ mkdir -p data/debug_micro_latents
 Run the tiny micro setup:
 
 ```bash
-.venv/bin/python scripts/train_micro_rama.py --config configs/debug_6gb_micro.yaml --out outputs/debug_micro_rama --disable-wandb --num-workers 0 --max-steps 10
+.venv/bin/python scripts/train/micro_rama.py --config configs/debug_6gb_micro.yaml --out outputs/debug_micro_rama --disable-wandb --num-workers 0 --max-steps 10
 ```

@@ -31,15 +31,15 @@ MICRO_CONFIG="${MICRO_CONFIG:-configs/celeba256_sdvae_micro.yaml}"
 BASES_PATH="${BASES_PATH:-cache/rama_bases_p256_d16.pt}"
 TOKENIZER_CONFIG="${TOKENIZER_CONFIG:-/kaggle/working/rama_tokenizer_config.pt}"
 
-MACRO_BATCH="${MACRO_BATCH:-256}"
+MACRO_BATCH="${MACRO_BATCH:-128}"
 MICRO_BATCH="${MICRO_BATCH:-128}"
 MACRO_STEPS="${MACRO_STEPS:-200000}"
 MICRO_STEPS="${MICRO_STEPS:-200000}"
 TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
 
-FID_EVERY="${FID_EVERY:-0}"
+FID_EVERY="${FID_EVERY:-10000}"
 FID_NUM_SAMPLES="${FID_NUM_SAMPLES:-1024}"
-SAMPLE_EVERY="${SAMPLE_EVERY:-0}"
+SAMPLE_EVERY="${SAMPLE_EVERY:-1000}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-16}"
 SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
 SAMPLER="${SAMPLER:-heun}"
@@ -71,7 +71,7 @@ command=(
   accelerate launch
   --num_processes "${ACCELERATE_NUM_PROCESSES}"
   --mixed_precision "${ACCELERATE_MIXED_PRECISION}"
-  scripts/train_joint_macro_micro.py
+  scripts/train/joint_macro_micro.py
   --macro-config "${MACRO_CONFIG}"
   --micro-config "${MICRO_CONFIG}"
   --latents "${LATENTS_DIR}"

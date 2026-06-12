@@ -6,7 +6,7 @@ latents:
 
 micro_latent:
   residual_shape: [4, 32, 32]
-  patch_size: 2
+  patch_size: 4
   patch_grid: [16, 16]
   num_patches: 256
   patch_dim: 16
@@ -19,7 +19,7 @@ rama_bases:
 
 rama:
   bases_path: cache/rama_bases_p256_d16.pt
-  patch_size: 2
+  patch_size: 4
   num_patches: 256
   patch_dim: 16
 

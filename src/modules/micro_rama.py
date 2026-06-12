@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from src.modules.unet_flow import group_norm
+from src.macro.unet import group_norm
 from src.modules.rama import rama_inverse, unpatchify
 
 try:

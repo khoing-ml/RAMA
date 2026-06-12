@@ -268,7 +268,7 @@ resolve_checkpoint_path() {
 }
 
 if [[ "${SKIP_CACHE:-0}" != "1" ]]; then
-  run_command "${PYTHON_BIN}" scripts/cache_sdvae_latents.py \
+  run_command "${PYTHON_BIN}" scripts/data/cache_sdvae_latents.py \
     --images "${IMAGES_DIR}" \
     --out "${LATENTS_DIR}" \
     --checkpoint "${VAE_CHECKPOINT}" \
@@ -283,7 +283,7 @@ else
   echo "Skipping latent cache; using cached latents under ${LATENTS_DIR}"
 fi
 
-run_command "${PYTHON_BIN}" scripts/estimate_quant_bound.py \
+run_command "${PYTHON_BIN}" scripts/dev/estimate_quant_bound.py \
   --latent-cache "${LATENTS_DIR}" \
   --bases "${BASES_PATH}" \
   --output "${TOKENIZER_CONFIG}" \
@@ -294,7 +294,7 @@ run_command "${PYTHON_BIN}" scripts/estimate_quant_bound.py \
   --device "${DEVICE}"
 
 if [[ "${SKIP_QUANT_RECONSTRUCTION:-0}" != "1" ]]; then
-  run_command "${PYTHON_BIN}" scripts/test_quant_reconstruction.py \
+  run_command "${PYTHON_BIN}" scripts/dev/test_quant_reconstruction.py \
     --latent-cache "${LATENTS_DIR}" \
     --bases "${BASES_PATH}" \
     --tokenizer-config "${TOKENIZER_CONFIG}" \
@@ -332,7 +332,7 @@ if [[ "${SKIP_MACRO:-0}" != "1" && "${SKIP_MICRO:-0}" != "1" ]]; then
   )
   add_optional_cli_flag joint_args --disable-wandb "${DISABLE_WANDB:-0}"
   add_optional_cli_flag joint_args --sample-argmax "${SAMPLE_ARGMAX:-0}"
-  train_with_accelerate scripts/train_joint_macro_micro.py "${joint_args[@]}"
+  train_with_accelerate scripts/train/joint_macro_micro.py "${joint_args[@]}"
 elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
   macro_args=(
     --config "${MACRO_CONFIG}" \
@@ -345,7 +345,7 @@ elif [[ "${SKIP_MACRO:-0}" != "1" ]]; then
     --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag macro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_macro_flow.py "${macro_args[@]}"
+  train_with_accelerate scripts/train/macro_flow.py "${macro_args[@]}"
   echo "Skipping micro training"
 elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
   micro_args=(
@@ -362,7 +362,7 @@ elif [[ "${SKIP_MICRO:-0}" != "1" ]]; then
     --fid-num-samples "${FID_NUM_SAMPLES}"
   )
   add_optional_cli_flag micro_args --disable-wandb "${DISABLE_WANDB:-0}"
-  train_with_accelerate scripts/train_micro_rama.py "${micro_args[@]}"
+  train_with_accelerate scripts/train/micro_rama.py "${micro_args[@]}"
   echo "Skipping macro training"
 else
   echo "Skipping macro training"
@@ -382,7 +382,7 @@ if [[ -z "${macro_checkpoint}" || -z "${micro_checkpoint}" ]]; then
   exit 1
 fi
 
-run_command "${PYTHON_BIN}" scripts/sample_macro_flow.py \
+run_command "${PYTHON_BIN}" scripts/sample/macro_flow.py \
   --checkpoint "${macro_checkpoint}" \
   --out outputs/macro_samples/macro_only_samples.png \
   --num-samples "${SAMPLE_COUNT}" \
@@ -393,7 +393,7 @@ run_command "${PYTHON_BIN}" scripts/sample_macro_flow.py \
   --dtype "${DTYPE}" \
   --device "${DEVICE}"
 
-run_command "${PYTHON_BIN}" scripts/reconstruct_micro_real_zl.py \
+run_command "${PYTHON_BIN}" scripts/sample/reconstruct_micro_real_zl.py \
   --micro-checkpoint "${micro_checkpoint}" \
   --latent-cache "${LATENTS_DIR}" \
   --bases "${BASES_PATH}" \
@@ -405,7 +405,7 @@ run_command "${PYTHON_BIN}" scripts/reconstruct_micro_real_zl.py \
   --device "${DEVICE}"
 
 if [[ "${SAMPLE_ARGMAX:-0}" == "1" ]]; then
-  run_command "${PYTHON_BIN}" scripts/sample_full_model.py \
+  run_command "${PYTHON_BIN}" scripts/sample/full_model.py \
     --macro-checkpoint "${macro_checkpoint}" \
     --micro-checkpoint "${micro_checkpoint}" \
     --bases "${BASES_PATH}" \
@@ -424,7 +424,7 @@ if [[ "${SAMPLE_ARGMAX:-0}" == "1" ]]; then
     --device "${DEVICE}" \
     --use-argmax
 else
-  run_command "${PYTHON_BIN}" scripts/sample_full_model.py \
+  run_command "${PYTHON_BIN}" scripts/sample/full_model.py \
     --macro-checkpoint "${macro_checkpoint}" \
     --micro-checkpoint "${micro_checkpoint}" \
     --bases "${BASES_PATH}" \

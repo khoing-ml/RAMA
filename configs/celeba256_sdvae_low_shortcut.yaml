@@ -1,0 +1,75 @@
+dataset:
+  name: celeba256
+  root: data/celeba256
+  image_size: 256
+  channels: 3
+  normalization: [-1, 1]
+
+vae:
+  checkpoint_id: stabilityai/sd-vae-ft-mse
+  local_checkpoint: checkpoints/sd-vae-ft-mse
+  cache_dir: .cache/huggingface
+  dtype: bf16
+  device: cuda
+
+latents:
+  output_dir: data/latents_low
+  cache_dtype: bf16
+  component: z_L
+
+decomposition:
+  macro_downsample_factor: 2
+  downsample_mode: avg_pool
+  upsample_mode: bilinear
+  align_corners: false
+
+macro_flow_model:
+  architecture: dit
+  variant: DiT-S/2
+  input_shape: [4, 16, 16]
+  patch_size: 2
+  hidden_size: 384
+  depth: 12
+  num_heads: 6
+  mlp_ratio: 4
+  dropout: 0.0
+  time_embedding_dim: 384
+  objective: shortcut
+  condition_on_dt: true
+
+shortcut:
+  denoise_timesteps: 128
+  bootstrap_every: 8
+  bootstrap_dt_bias: 0.0
+  clip_intermediate: 4.0
+
+training:
+  batch_size_per_gpu: 128
+  num_gpus: 1
+  global_batch_size: 128
+  gradient_accumulation_steps: 1
+  optimizer: AdamW
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-4
+  precision: fp16
+  ema: true
+  ema_decay: 0.9999
+  total_steps: 401000
+
+logging:
+  tracker: wandb
+  project: rama
+  entity: null
+  run_name: celeba256-sdvae-low-shortcut
+  log_every_steps: 100
+  sample_every_steps: 5000
+  checkpoint_every_steps: 10000
+  watch_model: false
+
+evaluation:
+  fid_every_steps: 10000
+  fid_num_samples: 1024
+  fid_batch_size: 32
+  sampler: shortcut
+  sampler_steps: 16
+  full_latent_size: 32

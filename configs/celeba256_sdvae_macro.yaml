@@ -62,3 +62,20 @@ evaluation:
   sampler: heun
   sampler_steps: 50
   full_latent_size: 32
+
+script:
+  python_bin: python
+  latents_dir: /kaggle/working/rama_latents
+  output_root: /kaggle/working/rama_outputs
+  macro_out: ${script.output_root}/macro_flow
+  micro_out: ${script.output_root}/micro_rama
+  macro_config: configs/celeba256_sdvae_macro.yaml
+  micro_config: configs/celeba256_sdvae_micro.yaml
+  bases_path: cache/rama_bases_p256_d16.pt
+  tokenizer_config: /kaggle/working/rama_tokenizer_config.pt
+  train_workers: 2
+  accelerate_num_processes: 1
+  accelerate_mixed_precision: fp16
+  disable_wandb: 0
+  sample_count: 16
+  sample_temperature: 1.0
