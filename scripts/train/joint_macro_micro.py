@@ -35,12 +35,12 @@ from src.micro.loss import categorical_micro_loss, categorical_micro_metrics, co
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.modules.ema import EMA
 from src.macro.losses import flow_matching_loss
-from src.data.latent_decomposition import reconstruct_from_decomposition
-from src.data.latent_dataset import CachedMicroLatentDataset
+from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.macro.factory import build_macro_flow_model
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import patchify, unpatchify
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.vae import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 
 

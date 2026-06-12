@@ -18,10 +18,10 @@ from src.modules.ema import EMA
 from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
 from src.macro.losses import flow_matching_loss, shortcut_matching_loss
 from src.macro.sampler import sample_macro_latents
-from src.data.latent_dataset import CachedLatentDataset, CachedMicroLatentDataset
-from src.data.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_dataset import CachedLatentDataset, CachedMicroLatentDataset
+from src.dataset.latent_decomposition import reconstruct_from_decomposition
 from src.macro.factory import build_macro_flow_model
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.vae import decode_latents, load_sd_vae
 
 
 def parse_args() -> argparse.Namespace:

@@ -19,7 +19,7 @@ from src.modules.ema import EMA
 from src.macro.factory import build_macro_flow_model
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import unpatchify
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.vae import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 from src.rama.tokenizer import build_tokenizer_from_config, load_tokenizer_config
 

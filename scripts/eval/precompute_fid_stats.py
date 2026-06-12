@@ -10,8 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.latent_dataset import CachedMicroLatentDataset
-from src.data.vae import load_sd_vae
+from src.dataset.latent_dataset import CachedMicroLatentDataset
+from src.dataset.vae import load_sd_vae
 from src.evaluation.fid import InceptionFID
 from scripts.eval._common import collect_real_fid_stats, save_fid_stats
 

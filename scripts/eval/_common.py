@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from src.data.latent_decomposition import reconstruct_from_decomposition
-from src.data.latent_dataset import CachedMicroLatentDataset
-from src.data.vae import decode_latents
+from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_dataset import CachedMicroLatentDataset
+from src.dataset.vae import decode_latents
 from src.evaluation.fid import FIDStats, InceptionFID, stats_from_feature_batches
 from src.macro.factory import build_macro_flow_model
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net

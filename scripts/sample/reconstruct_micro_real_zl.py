@@ -14,11 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
-from src.data.latent_dataset import CachedMicroLatentDataset
-from src.data.latent_decomposition import decompose_latent
+from src.dataset.latent_dataset import CachedMicroLatentDataset
+from src.dataset.latent_decomposition import decompose_latent
 from src.modules.micro_rama import build_context_encoder
 from src.modules.rama import unpatchify
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.vae import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 from src.rama.tokenizer import build_tokenizer_from_config, load_tokenizer_config
 

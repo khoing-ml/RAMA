@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.micro.loss import categorical_micro_loss, categorical_micro_metrics
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
-from src.data.latent_dataset import CachedMicroLatentDataset
+from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.modules.micro_rama import build_context_encoder
 from src.modules.rama import patchify
 from src.rama.projector import RAMAProjector

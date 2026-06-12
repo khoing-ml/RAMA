@@ -11,9 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.latent_dataset import CachedMicroLatentDataset
-from src.data.latent_decomposition import reconstruct_from_decomposition
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.latent_dataset import CachedMicroLatentDataset
+from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.vae import decode_latents, load_sd_vae
 from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
 from src.modules.micro_rama import sample_micro_latent
 from src.modules.rama import unpatchify

@@ -10,8 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.latent_decomposition import decompose_latent, reconstruct_from_decomposition
-from src.data.vae import decode_latents, encode_latents, load_image_tensor, load_sd_vae, tensor_to_image
+from src.dataset.latent_decomposition import decompose_latent, reconstruct_from_decomposition
+from src.dataset.vae import decode_latents, encode_latents, load_image_tensor, load_sd_vae, tensor_to_image
 
 
 def parse_args() -> argparse.Namespace:

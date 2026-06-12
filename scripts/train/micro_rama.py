@@ -15,13 +15,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
-from src.data.latent_decomposition import reconstruct_from_decomposition
-from src.data.latent_dataset import CachedMicroLatentDataset
+from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.micro.loss import categorical_micro_loss, categorical_micro_metrics, continuous_micro_nll_loss
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import make_orthogonal_bases, patchify, unpatchify
-from src.data.vae import decode_latents, load_sd_vae
+from src.dataset.vae import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
 from src.rama.tokenizer import RAMATokenizer, build_tokenizer_from_config, load_tokenizer_config
 
