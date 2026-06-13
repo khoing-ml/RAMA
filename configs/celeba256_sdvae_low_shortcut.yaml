@@ -42,7 +42,7 @@ macro_flow_model:
 
 shortcut:
   denoise_timesteps: 128
-  bootstrap_every: 2   # 1/N of batch → bootstrap; 2 = 50% (paper default)
+  bootstrap_every: 8  # 1/N of batch → bootstrap; 2 = 50% (paper default)
   bootstrap_dt_bias: 0.0
   clip_intermediate: 4.0
 
