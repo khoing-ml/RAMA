@@ -13,7 +13,7 @@ vae:
   device: cuda
 
 latents:
-  output_dir: /content/drive/MyDrive/RAMA/latents
+  output_dir: /content/drive/MyDrive/RAMA/latents_256/data/latents
   cache_dtype: bf16
   component: z_L
 
@@ -77,7 +77,7 @@ evaluation:
   fid_every_steps: 10000
   fid_num_samples: 5000
   fid_batch_size: 64
-  fid_stats: data/celeba256_fidstats_ours.npz   # path to pre-computed real FID stats (.npz or .pt)
+  fid_stats: /content/drive/MyDrive/RAMA/fid_stats_celeba256_5k.pt  # path to pre-computed real FID stats (.npz or .pt)
   sampler: shortcut
   sampler_steps: [1, 4, 128]   # evaluate FID and log sample images at each step count
   num_sample_images: 16        # images logged to wandb per step count
