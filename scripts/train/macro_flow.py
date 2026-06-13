@@ -117,7 +117,7 @@ def evaluate_multi_step_fid(
 
     If real_stats is provided (pre-computed), skips real Inception forward passes.
     Returns (fid_by_steps, components_by_steps) where components_by_steps maps each step
-    count to a dict with keys "output", "low_freq", and "z_h".
+    count to a dict with keys "output" and "low_freq".
     """
     was_training = model.training
     model.eval()
@@ -151,7 +151,6 @@ def evaluate_multi_step_fid(
         fake_feat_batches: list[torch.Tensor] = []
         out_collected: list[torch.Tensor] = []
         lf_collected: list[torch.Tensor] = []
-        zh_collected: list[torch.Tensor] = []
         n_collected = 0
         for z_h_cpu, shape in zip(z_h_store, shapes):
             z_h_gpu = z_h_cpu.to(device)
@@ -163,7 +162,6 @@ def evaluate_multi_step_fid(
             if n_collected < num_sample_images:
                 out_collected.append(imgs.cpu())
                 lf_collected.append(decode_latents(vae, z_l_up).cpu())
-                zh_collected.append(decode_latents(vae, z_h_gpu).cpu())
                 n_collected += imgs.shape[0]
         fid_results[steps] = calculate_fid(real_stats, stats_from_feature_batches(fake_feat_batches))
         if out_collected:
@@ -171,7 +169,6 @@ def evaluate_multi_step_fid(
             sample_components[steps] = {
                 "output": torch.cat(out_collected, dim=0)[:n],
                 "low_freq": torch.cat(lf_collected, dim=0)[:n],
-                "z_h": torch.cat(zh_collected, dim=0)[:n],
             }
 
     if was_training:

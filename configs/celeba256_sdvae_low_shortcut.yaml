@@ -20,7 +20,7 @@ latents:
 decomposition:
   macro_downsample_factor: 2
   downsample_mode: avg_pool
-  upsample_mode: bicubic
+  upsample_mode: bilinear
   align_corners: false
 
 macro_flow_model:
@@ -75,7 +75,7 @@ logging:
   watch_model: false
 
 evaluation:
-  fid_every_steps: 10000
+  fid_every_steps: 2000
   fid_num_samples: 5000
   fid_batch_size: 64
   fid_stats: /content/drive/MyDrive/RAMA/fid_stats_celeba256_5k.pt  # path to pre-computed real FID stats (.npz or .pt)

@@ -78,13 +78,18 @@ class CachedMicroLatentDataset(Dataset):
                 z_h = item.get("z_H", item.get("z_h"))
                 z_l_3d = z_l.squeeze(0) if z_l.ndim == 4 else z_l
                 z_h_3d = z_h.squeeze(0) if z_h.ndim == 4 else z_h
-                # Detect old bilinear-residual format: z_H had same channel count as z_L
-                # and 2× spatial size.  Convert by reconstructing z and re-decomposing.
-                if z_h_3d.shape[0] == z_l_3d.shape[0]:
-                    z_l_up = F.interpolate(
-                        z_l_3d.unsqueeze(0), scale_factor=2.0, mode="bilinear", align_corners=False
-                    )
-                    z_full = (z_l_up + z_h_3d.unsqueeze(0))
+                # Detect stale Haar cache: z_H has 3× the channels of z_L.
+                # Reconstruct z via Haar IDWT, then re-decompose with Laplacian.
+                if z_h_3d.shape[0] != z_l_3d.shape[0]:
+                    C = z_l_3d.shape[0]
+                    lh, hl, hh = z_h_3d[:C], z_h_3d[C:2*C], z_h_3d[2*C:]
+                    zl = z_l_3d.unsqueeze(0)
+                    H, W = zl.shape[-2], zl.shape[-1]
+                    z_full = torch.empty(1, C, H * 2, W * 2, device=zl.device, dtype=zl.dtype)
+                    z_full[:, :, 0::2, 0::2] = zl + lh + hl + hh
+                    z_full[:, :, 0::2, 1::2] = zl - lh + hl - hh
+                    z_full[:, :, 1::2, 0::2] = zl + lh - hl - hh
+                    z_full[:, :, 1::2, 1::2] = zl - lh - hl + hh
                     decomposition = decompose_latent(z_full)
                     z_l = decomposition.z_l
                     z_h = decomposition.z_h
