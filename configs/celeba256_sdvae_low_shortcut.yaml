@@ -13,7 +13,7 @@ vae:
   device: cuda
 
 latents:
-  output_dir: data/latents_low
+  output_dir: /content/drive/MyDrive/RAMA/outputs
   cache_dtype: bf16
   component: z_L
 
@@ -36,6 +36,9 @@ macro_flow_model:
   time_embedding_dim: 384
   objective: shortcut
   condition_on_dt: true
+  num_classes: 1            # 1 = no class conditioning (unconditional)
+  class_dropout_prob: 1.0   # 1.0 = always drop class label → unconditional generation
+  cfg_scale: 0.0            # 0.0 = disabled; >1.0 enables classifier-free guidance
 
 shortcut:
   denoise_timesteps: 128
@@ -68,8 +71,10 @@ logging:
 
 evaluation:
   fid_every_steps: 10000
-  fid_num_samples: 50000
+  fid_num_samples: 5000
   fid_batch_size: 64
+  fid_stats: data/celeba256_fidstats_ours.npz   # path to pre-computed real FID stats (.npz or .pt)
   sampler: shortcut
-  sampler_steps: 16
+  sampler_steps: [1, 4, 128]   # evaluate FID and log sample images at each step count
+  num_sample_images: 16        # images logged to wandb per step count
   full_latent_size: 32
