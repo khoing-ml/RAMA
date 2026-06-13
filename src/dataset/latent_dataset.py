@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from src.dataset.latent_decomposition import decompose_latent
@@ -66,14 +67,30 @@ class CachedMicroLatentDataset(Dataset):
             z_h = decomposition.z_h
         elif isinstance(item, dict):
             if "z" in item:
+                # Always re-decompose from z so z_H uses the current decomposition
+                # (ignores any stale z_L/z_H that may be stored alongside z in cache).
                 z = item["z"]
                 decomposition = decompose_latent(z.unsqueeze(0) if z.ndim == 3 else z)
-                z_l = item.get("z_L", item.get("z_l", decomposition.z_l))
-                z_h = item.get("z_H", item.get("z_h", decomposition.z_h))
+                z_l = decomposition.z_l
+                z_h = decomposition.z_h
             elif ("z_L" in item or "z_l" in item) and ("z_H" in item or "z_h" in item):
                 z_l = item.get("z_L", item.get("z_l"))
                 z_h = item.get("z_H", item.get("z_h"))
-                z = None
+                z_l_3d = z_l.squeeze(0) if z_l.ndim == 4 else z_l
+                z_h_3d = z_h.squeeze(0) if z_h.ndim == 4 else z_h
+                # Detect old bilinear-residual format: z_H had same channel count as z_L
+                # and 2× spatial size.  Convert by reconstructing z and re-decomposing.
+                if z_h_3d.shape[0] == z_l_3d.shape[0]:
+                    z_l_up = F.interpolate(
+                        z_l_3d.unsqueeze(0), scale_factor=2.0, mode="bilinear", align_corners=False
+                    )
+                    z_full = (z_l_up + z_h_3d.unsqueeze(0))
+                    decomposition = decompose_latent(z_full)
+                    z_l = decomposition.z_l
+                    z_h = decomposition.z_h
+                    z = z_full
+                else:
+                    z = None
             else:
                 raise KeyError(f"{self.paths[index]} must contain z, or both z_L and z_H")
         else:
