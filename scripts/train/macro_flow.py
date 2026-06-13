@@ -250,6 +250,7 @@ def main() -> None:
     log_every = int(logging_cfg.get("log_every_steps", 100))
     checkpoint_every = int(logging_cfg.get("checkpoint_every_steps", 10000))
     fid_every = args.fid_every if args.fid_every is not None else int(evaluation_cfg.get("fid_every_steps", 0))
+    sample_every = int(logging_cfg.get("sample_every_steps", 0))
     fid_num_samples = args.fid_num_samples or int(evaluation_cfg.get("fid_num_samples", 512))
     fid_batch_size = int(evaluation_cfg.get("fid_batch_size", min(batch_size, 32)))
     fid_sampler = str(evaluation_cfg.get("sampler", "heun"))
@@ -261,7 +262,8 @@ def main() -> None:
     fid_model = None
     fid_dataset = None
     precomputed_fid_stats = None
-    if accelerator.is_main_process and fid_every > 0:
+    sample_z_h: torch.Tensor | None = None
+    if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
         vae_cfg = config.get("vae", {})
         vae = load_sd_vae(
             checkpoint=resolve_vae_checkpoint(vae_cfg),
@@ -269,16 +271,21 @@ def main() -> None:
             dtype=str(vae_cfg.get("dtype", "fp16")),
             device=str(accelerator.device),
         )
-        fid_model = InceptionFID(accelerator.device)
         fid_dataset = CachedMicroLatentDataset(latent_dir)
-        fid_stats_path = evaluation_cfg.get("fid_stats")
-        if fid_stats_path:
-            p = Path(fid_stats_path)
-            if p.exists():
-                precomputed_fid_stats = load_precomputed_fid_stats(p)
-                accelerator.print(f"loaded pre-computed FID stats from {p}")
-            else:
-                accelerator.print(f"WARNING: fid_stats path {fid_stats_path!r} not found; computing real stats from dataset")
+        # Pre-fetch a fixed small batch of z_H for lightweight sampling visualization.
+        _tmp = DataLoader(fid_dataset, batch_size=num_sample_images, shuffle=False, num_workers=0)
+        sample_z_h = next(iter(_tmp))["z_H"][:num_sample_images].to(accelerator.device)
+        del _tmp
+        if fid_every > 0:
+            fid_model = InceptionFID(accelerator.device)
+            fid_stats_path = evaluation_cfg.get("fid_stats")
+            if fid_stats_path:
+                p = Path(fid_stats_path)
+                if p.exists():
+                    precomputed_fid_stats = load_precomputed_fid_stats(p)
+                    accelerator.print(f"loaded pre-computed FID stats from {p}")
+                else:
+                    accelerator.print(f"WARNING: fid_stats path {fid_stats_path!r} not found; computing real stats from dataset")
     grad_clip = float(training.get("grad_clip", 1.0))
     step = start_step
     model.train()
@@ -332,6 +339,32 @@ def main() -> None:
                         f" bootstrap={logs['train/loss_bootstrap']:.6f}"
                     )
                 accelerator.print(message)
+
+            if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and sample_z_h is not None:
+                import wandb
+                eval_model = accelerator.unwrap_model(model)
+                eval_model.eval()
+                with torch.no_grad():
+                    n = sample_z_h.shape[0]
+                    z_l_fake = sample_macro_latents(
+                        eval_model,
+                        shape=(n, eval_model.in_channels, eval_model.resolution, eval_model.resolution),
+                        method=fid_sampler,
+                        num_steps=fid_sampler_steps[0],
+                        device=str(accelerator.device),
+                    )
+                    z_fake = reconstruct_from_decomposition(z_l_fake, sample_z_h)
+                    imgs = decode_latents(vae, z_fake).cpu()
+                wandb.log(
+                    {
+                        f"samples/step{fid_sampler_steps[0]}": [
+                            wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
+                            for img in imgs
+                        ]
+                    },
+                    step=step,
+                )
+                eval_model.train()
 
             if fid_every > 0 and step % fid_every == 0:
                 accelerator.wait_for_everyone()
