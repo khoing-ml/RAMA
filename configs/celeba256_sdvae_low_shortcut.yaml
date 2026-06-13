@@ -57,7 +57,7 @@ training:
   gradient_accumulation_steps: 1
   optimizer: AdamW
   learning_rate: 2.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 0
   precision: bf16
   ema: true
   ema_decay: 0.9999

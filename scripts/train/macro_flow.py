@@ -112,12 +112,15 @@ def evaluate_multi_step_fid(
     device: torch.device,
     real_stats: FIDStats | None = None,
     num_sample_images: int = 16,
-) -> tuple[dict[int, float], dict[int, torch.Tensor]]:
+) -> tuple[dict[int, float], dict[int, dict[str, torch.Tensor]]]:
     """Evaluate FID and collect sample images for each step count in sampler_steps_list.
 
     If real_stats is provided (pre-computed), skips real Inception forward passes.
-    Returns (fid_by_steps, sample_images_by_steps).
+    Returns (fid_by_steps, components_by_steps) where components_by_steps maps each step
+    count to a dict with keys "output", "low_freq", and "z_h".
     """
+    import torch.nn.functional as F
+
     was_training = model.training
     model.eval()
 
@@ -144,28 +147,38 @@ def evaluate_multi_step_fid(
         real_stats = stats_from_feature_batches(real_feat_batches)
 
     fid_results: dict[int, float] = {}
-    sample_images: dict[int, torch.Tensor] = {}
+    sample_components: dict[int, dict[str, torch.Tensor]] = {}
 
     for steps in sampler_steps_list:
         fake_feat_batches: list[torch.Tensor] = []
-        collected: list[torch.Tensor] = []
+        out_collected: list[torch.Tensor] = []
+        lf_collected: list[torch.Tensor] = []
+        zh_collected: list[torch.Tensor] = []
         n_collected = 0
         for z_h_cpu, shape in zip(z_h_store, shapes):
             z_h_gpu = z_h_cpu.to(device)
             z_l_fake = sample_macro_latents(model, shape=shape, method=sampler, num_steps=steps, device=str(device))
-            z_fake = reconstruct_from_decomposition(z_l_fake, z_h_gpu)
+            z_l_up = F.interpolate(z_l_fake, size=z_h_gpu.shape[-2:], mode="bilinear", align_corners=False)
+            z_fake = z_l_up + z_h_gpu
             imgs = decode_latents(vae, z_fake)
             fake_feat_batches.append(fid_model(imgs))
             if n_collected < num_sample_images:
-                collected.append(imgs.cpu())
+                out_collected.append(imgs.cpu())
+                lf_collected.append(decode_latents(vae, z_l_up).cpu())
+                zh_collected.append(decode_latents(vae, z_h_gpu).cpu())
                 n_collected += imgs.shape[0]
         fid_results[steps] = calculate_fid(real_stats, stats_from_feature_batches(fake_feat_batches))
-        if collected:
-            sample_images[steps] = torch.cat(collected, dim=0)[:num_sample_images]
+        if out_collected:
+            n = num_sample_images
+            sample_components[steps] = {
+                "output": torch.cat(out_collected, dim=0)[:n],
+                "low_freq": torch.cat(lf_collected, dim=0)[:n],
+                "z_h": torch.cat(zh_collected, dim=0)[:n],
+            }
 
     if was_training:
         model.train()
-    return fid_results, sample_images
+    return fid_results, sample_components
 
 
 def main() -> None:
@@ -342,6 +355,7 @@ def main() -> None:
 
             if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and sample_z_h is not None:
                 import wandb
+                import torch.nn.functional as F
                 eval_model = accelerator.unwrap_model(model)
                 eval_model.eval()
                 with torch.no_grad():
@@ -353,14 +367,21 @@ def main() -> None:
                         num_steps=fid_sampler_steps[0],
                         device=str(accelerator.device),
                     )
-                    z_fake = reconstruct_from_decomposition(z_l_fake, sample_z_h)
-                    imgs = decode_latents(vae, z_fake).cpu()
+                    z_l_up = F.interpolate(z_l_fake, size=sample_z_h.shape[-2:], mode="bilinear", align_corners=False)
+                    imgs_output = decode_latents(vae, z_l_up + sample_z_h).cpu()
+                    imgs_low_freq = decode_latents(vae, z_l_up).cpu()
+                    imgs_zh = decode_latents(vae, sample_z_h).cpu()
+                def _to_wandb(tensors: torch.Tensor) -> list:
+                    return [
+                        wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
+                        for img in tensors
+                    ]
+                s = fid_sampler_steps[0]
                 wandb.log(
                     {
-                        f"samples/step{fid_sampler_steps[0]}": [
-                            wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
-                            for img in imgs
-                        ]
+                        f"samples/output_{s}step": _to_wandb(imgs_output),
+                        f"samples/low_freq_{s}step": _to_wandb(imgs_low_freq),
+                        f"samples/z_h_{s}step": _to_wandb(imgs_zh),
                     },
                     step=step,
                 )
@@ -378,7 +399,7 @@ def main() -> None:
                             if parameter.requires_grad
                         }
                         ema.copy_to(eval_model)
-                    fid_results, sample_imgs = evaluate_multi_step_fid(
+                    fid_results, sample_components = evaluate_multi_step_fid(
                         eval_model,
                         fid_dataset,
                         vae,
@@ -400,18 +421,16 @@ def main() -> None:
                     accelerator.log(fid_logs, step=step)
                     for s, v in fid_results.items():
                         accelerator.print(f"step={step} fid_{s}step={v:.4f}")
-                    if tracker == "wandb" and sample_imgs:
+                    if tracker == "wandb" and sample_components:
                         import wandb
-                        wandb.log(
-                            {
-                                f"eval/samples_{s}step": [
+                        wandb_imgs: dict[str, list] = {}
+                        for s, components in sample_components.items():
+                            for key, tensors in components.items():
+                                wandb_imgs[f"eval/{key}_{s}step"] = [
                                     wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
-                                    for img in imgs
+                                    for img in tensors
                                 ]
-                                for s, imgs in sample_imgs.items()
-                            },
-                            step=step,
-                        )
+                        wandb.log(wandb_imgs, step=step)
                     model.train()
                 accelerator.wait_for_everyone()
 
