@@ -42,7 +42,7 @@ macro_flow_model:
 
 shortcut:
   denoise_timesteps: 128
-  bootstrap_every: 8
+  bootstrap_every: 2   # 1/N of batch → bootstrap; 2 = 50% (paper default)
   bootstrap_dt_bias: 0.0
   clip_intermediate: 4.0
 
@@ -51,9 +51,9 @@ output:
   resume: null                                 # set to a checkpoint path to resume training
 
 training:
-  batch_size_per_gpu: 128
+  batch_size_per_gpu: 256
   num_gpus: 1
-  global_batch_size: 128
+  global_batch_size: 256
   gradient_accumulation_steps: 1
   optimizer: AdamW
   learning_rate: 2.0e-4
