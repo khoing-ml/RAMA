@@ -7,7 +7,6 @@ from itertools import cycle
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
@@ -35,7 +34,7 @@ from src.micro.loss import categorical_micro_loss, categorical_micro_metrics, co
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.modules.ema import EMA
 from src.macro.losses import flow_matching_loss
-from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.macro.factory import build_macro_flow_model
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
@@ -117,7 +116,6 @@ def evaluate_full_fid(
         current_batch = min(batch_size, remaining)
         shape = (current_batch, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
         z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
-        z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
         if micro_type == "categorical":
             if tokenizer is None:
                 raise RuntimeError("categorical full FID requires a RAMATokenizer")
@@ -145,7 +143,7 @@ def evaluate_full_fid(
                 patch_size=patch_size,
                 noise_scale=noise_scale,
             )
-        z_hat = z_l_up + z_h_hat
+        z_hat = reconstruct_from_decomposition(z_l, z_h_hat)
         fake_batches.append(fid_model(decode_latents(vae, z_hat)))
         remaining -= current_batch
 
@@ -190,7 +188,6 @@ def sample_and_save(
 
     shape = (num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
     z_l = sample_macro_latents(macro_model, shape=shape, method=sampler, num_steps=sampler_steps, device=str(device))
-    z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
     if micro_type == "categorical":
         if tokenizer is None:
             raise RuntimeError("categorical sampling requires a RAMATokenizer")
@@ -218,9 +215,9 @@ def sample_and_save(
             patch_size=patch_size,
             noise_scale=noise_scale,
         )
-    z_hat = z_l_up + z_h_hat
+    z_hat = reconstruct_from_decomposition(z_l, z_h_hat)
 
-    macro_images = decode_latents(vae, z_l_up)
+    macro_images = decode_latents(vae, reconstruct_low_freq(z_l))
     micro_images = decode_latents(vae, z_h_hat)
     full_images = decode_latents(vae, z_hat)
 

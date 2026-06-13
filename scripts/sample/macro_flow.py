@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import yaml
 from torchvision.utils import save_image
 
@@ -17,6 +16,7 @@ from src.macro.sampler import sample_macro_latents
 from src.modules.ema import EMA
 from src.macro.factory import build_macro_flow_model
 from src.dataset.vae import decode_latents, load_sd_vae
+from src.dataset.latent_decomposition import reconstruct_low_freq
 
 
 def resolve_vae_checkpoint(vae_cfg: dict[str, object], override: str | None) -> str:
@@ -74,11 +74,10 @@ def main() -> None:
     shape = (args.num_samples, model.in_channels, model.resolution, model.resolution)
     z_l = sample_macro_latents(model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
     full_latent_size = resolve_full_latent_size(config, model.resolution)
-    z_l_up = F.interpolate(z_l, size=(full_latent_size, full_latent_size), mode="bilinear", align_corners=False)
     vae_cfg = config.get("vae", {})
     vae_checkpoint = resolve_vae_checkpoint(vae_cfg, args.vae_checkpoint)
     vae = load_sd_vae(checkpoint=str(vae_checkpoint), cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
-    images = decode_latents(vae, z_l_up)
+    images = decode_latents(vae, reconstruct_low_freq(z_l))
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

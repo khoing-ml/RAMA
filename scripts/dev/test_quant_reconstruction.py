@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torchvision.utils import save_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -13,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.dataset.latent_dataset import CachedMicroLatentDataset
-from src.dataset.latent_decomposition import decompose_latent
+from src.dataset.latent_decomposition import decompose_latent, reconstruct_from_decomposition
 from src.modules.rama import patchify, unpatchify
 from src.dataset.vae import decode_latents, load_sd_vae
 from src.rama.projector import RAMAProjector
@@ -43,20 +42,20 @@ def quantization_only_reconstruct(
     patch_size: int = 2,
 ) -> torch.Tensor:
     decomposition = decompose_latent(z)
-    patches = patchify(decomposition.z_h, patch_size=patch_size)
+    z_h = decomposition.z_h
+    patches = patchify(z_h, patch_size=patch_size)
     y = projector.project(patches)
     tokens = tokenizer.quantize(y)
     y_hat = tokenizer.dequantize(tokens)
     patches_hat = projector.inverse(y_hat)
     z_h_hat = unpatchify(
         patches_hat,
-        channels=z.shape[1],
-        height=z.shape[2],
-        width=z.shape[3],
+        channels=z_h.shape[1],
+        height=z_h.shape[2],
+        width=z_h.shape[3],
         patch_size=patch_size,
     )
-    z_l_up = F.interpolate(decomposition.z_l, size=z.shape[-2:], mode="bilinear", align_corners=False)
-    return z_l_up + z_h_hat
+    return reconstruct_from_decomposition(decomposition.z_l, z_h_hat)
 
 
 def main() -> None:
@@ -69,8 +68,7 @@ def main() -> None:
     else:
         z_l = item["z_L"].unsqueeze(0)
         z_h = item["z_H"].unsqueeze(0)
-        z_l_up = F.interpolate(z_l, size=z_h.shape[-2:], mode="bilinear", align_corners=False)
-        z = z_l_up + z_h
+        z = reconstruct_from_decomposition(z_l, z_h)
         decomposition = decompose_latent(z)
 
     bases = torch.load(args.bases, map_location="cpu").float()

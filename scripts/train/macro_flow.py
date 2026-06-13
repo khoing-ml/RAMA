@@ -19,7 +19,7 @@ from src.evaluation.fid import FIDStats, InceptionFID, calculate_fid, stats_from
 from src.macro.losses import flow_matching_loss, shortcut_matching_loss
 from src.macro.sampler import sample_macro_latents
 from src.dataset.latent_dataset import CachedLatentDataset, CachedMicroLatentDataset
-from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.macro.factory import build_macro_flow_model
 from src.dataset.vae import decode_latents, load_sd_vae
 
@@ -119,8 +119,6 @@ def evaluate_multi_step_fid(
     Returns (fid_by_steps, components_by_steps) where components_by_steps maps each step
     count to a dict with keys "output", "low_freq", and "z_h".
     """
-    import torch.nn.functional as F
-
     was_training = model.training
     model.eval()
 
@@ -158,8 +156,8 @@ def evaluate_multi_step_fid(
         for z_h_cpu, shape in zip(z_h_store, shapes):
             z_h_gpu = z_h_cpu.to(device)
             z_l_fake = sample_macro_latents(model, shape=shape, method=sampler, num_steps=steps, device=str(device))
-            z_l_up = F.interpolate(z_l_fake, size=z_h_gpu.shape[-2:], mode="bilinear", align_corners=False)
-            z_fake = z_l_up + z_h_gpu
+            z_fake = reconstruct_from_decomposition(z_l_fake, z_h_gpu)
+            z_l_up = reconstruct_low_freq(z_l_fake)
             imgs = decode_latents(vae, z_fake)
             fake_feat_batches.append(fid_model(imgs))
             if n_collected < num_sample_images:
@@ -179,6 +177,68 @@ def evaluate_multi_step_fid(
     if was_training:
         model.train()
     return fid_results, sample_components
+
+
+def print_model_summary(model: torch.nn.Module, dummy_inputs: tuple) -> None:
+    """Print per-layer input/output shapes by running one dry forward pass with hooks."""
+
+    def _fmt_shape(x: object) -> str:
+        if isinstance(x, torch.Tensor):
+            return "[" + ", ".join(str(d) for d in x.shape) + "]"
+        if isinstance(x, (tuple, list)):
+            parts = [_fmt_shape(t) for t in x if isinstance(t, torch.Tensor)]
+            return " | ".join(parts) if parts else "—"
+        return "—"
+
+    records: list[tuple[str, str, str, str, int]] = []
+    handles = []
+
+    for name, module in model.named_modules():
+        def _make_hook(n: str):
+            def _hook(mod: torch.nn.Module, inp: tuple, out: object) -> None:
+                n_params = sum(p.numel() for p in mod.parameters(recurse=False))
+                records.append((n or "(root)", type(mod).__name__, _fmt_shape(inp), _fmt_shape(out), n_params))
+            return _hook
+        handles.append(module.register_forward_hook(_make_hook(name)))
+
+    model.eval()
+    with torch.no_grad():
+        try:
+            model(*dummy_inputs)
+        except Exception as exc:
+            print(f"[summary] dry forward pass failed: {exc}")
+    model.train()
+
+    for h in handles:
+        h.remove()
+
+    col = (4, 38, 26, 26, 26, 11)
+    total = sum(col) + len(col) + 1
+    header = (
+        f"{'#':<{col[0]}} {'Name':<{col[1]}} {'Type':<{col[2]}} "
+        f"{'Input':<{col[3]}} {'Output':<{col[4]}} {'Params':>{col[5]}}"
+    )
+    sep = "─" * total
+
+    print()
+    print("Model Summary")
+    print("═" * total)
+    print(header)
+    print(sep)
+    for i, (name, typ, in_s, out_s, n) in enumerate(records):
+        depth = name.count(".")
+        indent = "  " * depth
+        short = (indent + name.rsplit(".", 1)[-1]) if "." in name else (indent + name)
+        short = short[: col[1] - 1]
+        print(
+            f"{i:<{col[0]}} {short:<{col[1]}} {typ:<{col[2]}} "
+            f"{in_s:<{col[3]}} {out_s:<{col[4]}} {n:>{col[5]},}"
+        )
+    print("═" * total)
+    total_p = sum(p.numel() for p in model.parameters())
+    trainable_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total params: {total_p:,}   Trainable: {trainable_p:,}")
+    print()
 
 
 def main() -> None:
@@ -224,6 +284,15 @@ def main() -> None:
         )
 
     model = build_macro_flow_model(model_cfg)
+
+    if accelerator.is_main_process:
+        input_shape = [int(d) for d in model_cfg.get("input_shape", [4, 16, 16])]
+        _B = 2
+        _dummy_x = torch.randn(_B, *input_shape)
+        _dummy_t = torch.rand(_B)
+        _dummy_dt = torch.zeros(_B)
+        print_model_summary(model, (_dummy_x, _dummy_t, _dummy_dt))
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training.get("learning_rate", training.get("lr", 2.0e-4))),
@@ -355,7 +424,6 @@ def main() -> None:
 
             if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and sample_z_h is not None:
                 import wandb
-                import torch.nn.functional as F
                 eval_model = accelerator.unwrap_model(model)
                 eval_model.eval()
                 with torch.no_grad():
@@ -367,9 +435,8 @@ def main() -> None:
                         num_steps=fid_sampler_steps[0],
                         device=str(accelerator.device),
                     )
-                    z_l_up = F.interpolate(z_l_fake, size=sample_z_h.shape[-2:], mode="bilinear", align_corners=False)
-                    imgs_output = decode_latents(vae, z_l_up + sample_z_h).cpu()
-                    imgs_low_freq = decode_latents(vae, z_l_up).cpu()
+                    imgs_output = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, sample_z_h)).cpu()
+                    imgs_low_freq = decode_latents(vae, reconstruct_low_freq(z_l_fake)).cpu()
                     imgs_zh = decode_latents(vae, sample_z_h).cpu()
                 def _to_wandb(tensors: torch.Tensor) -> list:
                     return [

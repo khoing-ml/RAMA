@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import yaml
 from torchvision.utils import save_image
 
@@ -20,6 +19,7 @@ from src.macro.factory import build_macro_flow_model
 from src.modules.micro_rama import build_context_encoder, build_micro_rama_net, sample_micro_latent
 from src.modules.rama import unpatchify
 from src.dataset.vae import decode_latents, load_sd_vae
+from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.rama.projector import RAMAProjector
 from src.rama.tokenizer import build_tokenizer_from_config, load_tokenizer_config
 
@@ -190,7 +190,6 @@ def main() -> None:
 
     shape = (args.num_samples, macro_model.in_channels, macro_model.resolution, macro_model.resolution)
     z_l = sample_macro_latents(macro_model, shape=shape, method=args.sampler, num_steps=args.steps, device=args.device)
-    z_l_up = F.interpolate(z_l, size=(latent_height, latent_width), mode="bilinear", align_corners=False)
     if micro_type == "categorical":
         if tokenizer is None:
             raise RuntimeError("categorical micro sampling requires a tokenizer")
@@ -218,12 +217,12 @@ def main() -> None:
             patch_size=patch_size,
             noise_scale=args.noise_scale,
         )
-    z_hat = z_l_up + z_h_hat
+    z_hat = reconstruct_from_decomposition(z_l, z_h_hat)
 
     vae_cfg = macro_config.get("vae", {})
     vae_checkpoint = resolve_vae_checkpoint(vae_cfg, args.vae_checkpoint)
     vae = load_sd_vae(checkpoint=str(vae_checkpoint), cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
-    macro_images = decode_latents(vae, z_l_up)
+    macro_images = decode_latents(vae, reconstruct_low_freq(z_l))
     micro_images = decode_latents(vae, z_h_hat)
     full_images = decode_latents(vae, z_hat)
 

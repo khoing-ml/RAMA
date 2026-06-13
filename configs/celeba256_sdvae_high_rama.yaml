@@ -16,23 +16,23 @@ vae:
   device: cuda
 
 micro_latent:
-  residual_shape: [4, 32, 32]
+  residual_shape: [12, 16, 16]
   patch_size: 2
-  patch_grid: [16, 16]
-  num_patches: 256
-  patch_dim: 16
+  patch_grid: [8, 8]
+  num_patches: 64
+  patch_dim: 48
 
 rama_bases:
-  cache_path: cache/rama_bases_p256_d16.pt
-  num_patches: 256
-  patch_dim: 16
+  cache_path: cache/rama_bases_p64_d48.pt
+  num_patches: 64
+  patch_dim: 48
   seed: 1234
 
 rama:
-  bases_path: cache/rama_bases_p256_d16.pt
+  bases_path: cache/rama_bases_p64_d48.pt
   patch_size: 2
-  num_patches: 256
-  patch_dim: 16
+  num_patches: 64
+  patch_dim: 48
 
 tokenizer:
   config_path: cache/rama_tokenizer_config.pt
@@ -59,7 +59,7 @@ micro:
   type: categorical
   architecture: transformer
   context_dim: 256
-  patch_dim: 16
+  patch_dim: 48
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4
@@ -75,7 +75,7 @@ micro_rama_net:
   type: categorical
   architecture: transformer
   context_dim: 256
-  patch_dim: 16
+  patch_dim: 48
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4
@@ -90,7 +90,7 @@ micro_continuous:
   type: nflows
   enabled: false
   context_dim: 256
-  patch_dim: 16
+  patch_dim: 48
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4

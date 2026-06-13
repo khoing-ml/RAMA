@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 import yaml
 from torchvision.utils import save_image
 
@@ -15,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
 from src.dataset.latent_dataset import CachedMicroLatentDataset
-from src.dataset.latent_decomposition import decompose_latent
+from src.dataset.latent_decomposition import decompose_latent, reconstruct_from_decomposition, reconstruct_low_freq
 from src.modules.micro_rama import build_context_encoder
 from src.modules.rama import unpatchify
 from src.dataset.vae import decode_latents, load_sd_vae
@@ -94,12 +93,13 @@ def main() -> None:
         z = item["z"].unsqueeze(0).to(args.device)
         decomposition = decompose_latent(z)
         z_l = decomposition.z_l
+        z_h = decomposition.z_h
         z_l_up = decomposition.z_l_up
     else:
         z_l = item["z_L"].unsqueeze(0).to(args.device)
         z_h = item["z_H"].unsqueeze(0).to(args.device)
-        z_l_up = F.interpolate(z_l, size=z_h.shape[-2:], mode="bilinear", align_corners=False)
-        z = z_l_up + z_h
+        z_l_up = reconstruct_low_freq(z_l)
+        z = reconstruct_from_decomposition(z_l, z_h)
 
     with torch.no_grad():
         logits = micro_model(context_encoder(z_l))
@@ -108,12 +108,12 @@ def main() -> None:
         patches_hat = projector.inverse(y_hat)
         z_h_hat = unpatchify(
             patches_hat,
-            channels=z_l_up.shape[1],
-            height=z_l_up.shape[2],
-            width=z_l_up.shape[3],
+            channels=z_h.shape[1],
+            height=z_h.shape[2],
+            width=z_h.shape[3],
             patch_size=patch_size,
         )
-        z_hat = z_l_up + z_h_hat
+        z_hat = reconstruct_from_decomposition(z_l, z_h_hat)
         vae = load_sd_vae(checkpoint=args.vae_checkpoint, cache_dir=args.cache_dir, dtype=args.dtype, device=args.device)
         images = torch.cat([decode_latents(vae, z), decode_latents(vae, z_l_up), decode_latents(vae, z_hat)], dim=0)
 
