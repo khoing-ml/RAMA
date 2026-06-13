@@ -20,7 +20,7 @@ latents:
 decomposition:
   macro_downsample_factor: 2
   downsample_mode: avg_pool
-  upsample_mode: bilinear
+  upsample_mode: bicubic
   align_corners: false
 
 macro_flow_model:
