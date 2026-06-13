@@ -13,7 +13,7 @@ vae:
   device: cuda
 
 latents:
-  output_dir: /content/drive/MyDrive/RAMA/outputs
+  output_dir: /content/drive/MyDrive/RAMA/latents
   cache_dtype: bf16
   component: z_L
 
@@ -45,6 +45,10 @@ shortcut:
   bootstrap_every: 8
   bootstrap_dt_bias: 0.0
   clip_intermediate: 4.0
+
+output:
+  dir: /content/drive/MyDrive/RAMA/outputs  # checkpoints saved under {dir}/checkpoints/
+  resume: null                                 # set to a checkpoint path to resume training
 
 training:
   batch_size_per_gpu: 128

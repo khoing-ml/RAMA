@@ -188,7 +188,8 @@ def main() -> None:
         log_with="wandb" if tracker == "wandb" else None,
     )
 
-    out_dir = Path(args.out)
+    output_cfg = config.get("output", {})
+    out_dir = Path(args.out if args.out != "outputs/macro_flow" else output_cfg.get("dir", args.out))
     if accelerator.is_main_process:
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -220,8 +221,9 @@ def main() -> None:
     ema = EMA(accelerator.unwrap_model(model), float(training.get("ema_decay", 0.9999))) if training.get("ema", True) else None
     start_step = 0
 
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu")
+    resume_path = args.resume or output_cfg.get("resume") or None
+    if resume_path:
+        checkpoint = torch.load(resume_path, map_location="cpu")
         accelerator.unwrap_model(model).load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         if ema is not None and checkpoint.get("ema") is not None:
