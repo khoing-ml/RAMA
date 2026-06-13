@@ -386,6 +386,7 @@ def main() -> None:
                         bootstrap_every=int(shortcut_cfg.get("bootstrap_every", 8)),
                         bootstrap_dt_bias=float(shortcut_cfg.get("bootstrap_dt_bias", 0.0)),
                         clip_intermediate=float(shortcut_cfg.get("clip_intermediate", 4.0)),
+                        bootstrap_loss_weight=float(shortcut_cfg.get("bootstrap_loss_weight", 1.0)),
                     )
                 elif objective in {"rectified_flow", "flow_matching", "naive"}:
                     loss, metrics = flow_matching_loss(model, z_l)
@@ -435,9 +436,11 @@ def main() -> None:
                         num_steps=fid_sampler_steps[0],
                         device=str(accelerator.device),
                     )
-                    imgs_output = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, sample_z_h)).cpu()
-                    imgs_low_freq = decode_latents(vae, reconstruct_low_freq(z_l_fake)).cpu()
-                    imgs_zh = decode_latents(vae, sample_z_h).cpu()
+                    _z_full = reconstruct_from_decomposition(z_l_fake, sample_z_h)
+                    _z_lf = reconstruct_low_freq(z_l_fake)
+                    imgs_output = decode_latents(vae, _z_full).cpu()
+                    imgs_low_freq = decode_latents(vae, _z_lf).cpu()
+                    imgs_zh = decode_latents(vae, _z_full - _z_lf).cpu()
                 def _to_wandb(tensors: torch.Tensor) -> list:
                     return [
                         wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())

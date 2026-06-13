@@ -50,6 +50,7 @@ def shortcut_matching_loss(
     bootstrap_every: int = 8,
     bootstrap_dt_bias: float = 0.0,
     clip_intermediate: float = 4.0,
+    bootstrap_loss_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Shortcut-model loss on low-frequency latents.
 
@@ -137,7 +138,7 @@ def shortcut_matching_loss(
     per_item_mse = (pred_v - target_v).pow(2).mean(dim=(1, 2, 3))
     loss_bootstrap = per_item_mse[:bootstrap_size].mean()
     loss_flow = per_item_mse[bootstrap_size:].mean()
-    loss = per_item_mse.mean()
+    loss = loss_flow + bootstrap_loss_weight * loss_bootstrap
     metrics = {
         "loss": loss.detach(),
         "loss_flow": loss_flow.detach(),
