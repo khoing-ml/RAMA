@@ -19,7 +19,7 @@ from src.evaluation.fid import FIDStats, InceptionFID, calculate_fid, stats_from
 from src.macro.losses import flow_matching_loss, shortcut_matching_loss
 from src.macro.sampler import sample_macro_latents
 from src.dataset.latent_dataset import CachedLatentDataset, CachedMicroLatentDataset
-from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
+from src.dataset.latent_decomposition import reconstruct_low_freq
 from src.macro.factory import build_macro_flow_model
 from src.dataset.vae import decode_latents, load_sd_vae
 
@@ -115,9 +115,10 @@ def evaluate_multi_step_fid(
 ) -> tuple[dict[int, float], dict[int, dict[str, torch.Tensor]]]:
     """Evaluate FID and collect sample images for each step count in sampler_steps_list.
 
-    If real_stats is provided (pre-computed), skips real Inception forward passes.
-    Returns (fid_by_steps, components_by_steps) where components_by_steps maps each step
-    count to a dict with keys "output" and "low_freq".
+    Both real and fake images use reconstruct_low_freq(z_l) so the comparison is symmetric
+    — the macro model is only responsible for z_l, so we evaluate it at that scale.
+    If real_stats is provided (pre-computed low-freq stats), skips real forward passes.
+    Returns (fid_by_steps, sample_images_by_steps) where sample_images maps steps -> "low_freq" tensor.
     """
     was_training = model.training
     model.eval()
@@ -126,18 +127,14 @@ def evaluate_multi_step_fid(
     remaining = num_samples
     compute_real = real_stats is None
     real_feat_batches: list[torch.Tensor] = []
-    z_h_store: list[torch.Tensor] = []
     shapes: list[tuple[int, int, int, int]] = []
 
     for batch in loader:
         if remaining <= 0:
             break
         z_l = batch["z_L"][:remaining].to(device)
-        z_h = batch["z_H"][:remaining].to(device)
         if compute_real:
-            z_real = reconstruct_from_decomposition(z_l, z_h)
-            real_feat_batches.append(fid_model(decode_latents(vae, z_real)))
-        z_h_store.append(z_h.cpu())
+            real_feat_batches.append(fid_model(decode_latents(vae, reconstruct_low_freq(z_l))))
         shapes.append((z_l.shape[0], model.in_channels, model.resolution, model.resolution))
         remaining -= z_l.shape[0]
 
@@ -149,26 +146,19 @@ def evaluate_multi_step_fid(
 
     for steps in sampler_steps_list:
         fake_feat_batches: list[torch.Tensor] = []
-        out_collected: list[torch.Tensor] = []
-        lf_collected: list[torch.Tensor] = []
+        imgs_collected: list[torch.Tensor] = []
         n_collected = 0
-        for z_h_cpu, shape in zip(z_h_store, shapes):
-            z_h_gpu = z_h_cpu.to(device)
+        for shape in shapes:
             z_l_fake = sample_macro_latents(model, shape=shape, method=sampler, num_steps=steps, device=str(device))
-            z_fake = reconstruct_from_decomposition(z_l_fake, z_h_gpu)
-            z_l_up = reconstruct_low_freq(z_l_fake)
-            imgs = decode_latents(vae, z_fake)
+            imgs = decode_latents(vae, reconstruct_low_freq(z_l_fake))
             fake_feat_batches.append(fid_model(imgs))
             if n_collected < num_sample_images:
-                out_collected.append(imgs.cpu())
-                lf_collected.append(decode_latents(vae, z_l_up).cpu())
+                imgs_collected.append(imgs.cpu())
                 n_collected += imgs.shape[0]
         fid_results[steps] = calculate_fid(real_stats, stats_from_feature_batches(fake_feat_batches))
-        if out_collected:
-            n = num_sample_images
+        if imgs_collected:
             sample_components[steps] = {
-                "output": torch.cat(out_collected, dim=0)[:n],
-                "low_freq": torch.cat(lf_collected, dim=0)[:n],
+                "low_freq": torch.cat(imgs_collected, dim=0)[:num_sample_images],
             }
 
     if was_training:
@@ -341,7 +331,6 @@ def main() -> None:
     fid_model = None
     fid_dataset = None
     precomputed_fid_stats = None
-    sample_z_h: torch.Tensor | None = None
     if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
         vae_cfg = config.get("vae", {})
         vae = load_sd_vae(
@@ -351,10 +340,6 @@ def main() -> None:
             device=str(accelerator.device),
         )
         fid_dataset = CachedMicroLatentDataset(latent_dir)
-        # Pre-fetch a fixed small batch of z_H for lightweight sampling visualization.
-        _tmp = DataLoader(fid_dataset, batch_size=num_sample_images, shuffle=False, num_workers=0)
-        sample_z_h = next(iter(_tmp))["z_H"][:num_sample_images].to(accelerator.device)
-        del _tmp
         if fid_every > 0:
             fid_model = InceptionFID(accelerator.device)
             fid_stats_path = evaluation_cfg.get("fid_stats")
@@ -420,38 +405,41 @@ def main() -> None:
                     )
                 accelerator.print(message)
 
-            if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and sample_z_h is not None:
+            if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and vae is not None:
                 import wandb
                 eval_model = accelerator.unwrap_model(model)
+                backup = None
+                if ema is not None:
+                    backup = {
+                        name: parameter.detach().clone()
+                        for name, parameter in eval_model.named_parameters()
+                        if parameter.requires_grad
+                    }
+                    ema.copy_to(eval_model)
                 eval_model.eval()
+                wandb_imgs: dict[str, list] = {}
                 with torch.no_grad():
-                    n = sample_z_h.shape[0]
-                    z_l_fake = sample_macro_latents(
-                        eval_model,
-                        shape=(n, eval_model.in_channels, eval_model.resolution, eval_model.resolution),
-                        method=fid_sampler,
-                        num_steps=fid_sampler_steps[0],
-                        device=str(accelerator.device),
-                    )
-                    _z_full = reconstruct_from_decomposition(z_l_fake, sample_z_h)
-                    _z_lf = reconstruct_low_freq(z_l_fake)
-                    imgs_output = decode_latents(vae, _z_full).cpu()
-                    imgs_low_freq = decode_latents(vae, _z_lf).cpu()
-                    imgs_zh = decode_latents(vae, _z_full - _z_lf).cpu()
-                def _to_wandb(tensors: torch.Tensor) -> list:
-                    return [
-                        wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
-                        for img in tensors
-                    ]
-                s = fid_sampler_steps[0]
-                wandb.log(
-                    {
-                        f"samples/output_{s}step": _to_wandb(imgs_output),
-                        f"samples/low_freq_{s}step": _to_wandb(imgs_low_freq),
-                        f"samples/z_h_{s}step": _to_wandb(imgs_zh),
-                    },
-                    step=step,
-                )
+                    n = num_sample_images
+                    shape = (n, eval_model.in_channels, eval_model.resolution, eval_model.resolution)
+                    for s in fid_sampler_steps:
+                        z_l_fake = sample_macro_latents(
+                            eval_model,
+                            shape=shape,
+                            method=fid_sampler,
+                            num_steps=s,
+                            device=str(accelerator.device),
+                        )
+                        imgs = decode_latents(vae, reconstruct_low_freq(z_l_fake)).cpu()
+                        wandb_imgs[f"samples/low_freq_{s}step"] = [
+                            wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
+                            for img in imgs
+                        ]
+                wandb.log(wandb_imgs, step=step)
+                if backup is not None:
+                    with torch.no_grad():
+                        for name, parameter in eval_model.named_parameters():
+                            if name in backup:
+                                parameter.copy_(backup[name])
                 eval_model.train()
 
             if fid_every > 0 and step % fid_every == 0:
