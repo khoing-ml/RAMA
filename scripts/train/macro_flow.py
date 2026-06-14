@@ -19,7 +19,7 @@ from src.evaluation.fid import FIDStats, InceptionFID, calculate_fid, stats_from
 from src.macro.losses import flow_matching_loss, shortcut_matching_loss
 from src.macro.sampler import sample_macro_latents
 from src.dataset.latent_dataset import CachedLatentDataset, CachedMicroLatentDataset
-from src.dataset.latent_decomposition import reconstruct_low_freq
+from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.macro.factory import build_macro_flow_model
 from src.dataset.vae import decode_latents, load_sd_vae
 
@@ -115,10 +115,12 @@ def evaluate_multi_step_fid(
 ) -> tuple[dict[int, float], dict[int, dict[str, torch.Tensor]]]:
     """Evaluate FID and collect sample images for each step count in sampler_steps_list.
 
-    Both real and fake images use reconstruct_low_freq(z_l) so the comparison is symmetric
-    — the macro model is only responsible for z_l, so we evaluate it at that scale.
-    If real_stats is provided (pre-computed low-freq stats), skips real forward passes.
-    Returns (fid_by_steps, sample_images_by_steps) where sample_images maps steps -> "low_freq" tensor.
+    Real images use the full reconstruction up(z_l) + z_h.
+    Fake images use the generated z_l combined with the real z_h from the same batch position,
+    i.e. up(z_l_fake) + z_h_real — the macro model is evaluated on full image quality using
+    real high-frequency detail as a proxy for the missing micro model.
+    If real_stats is provided (pre-computed), skips real Inception forward passes.
+    Returns (fid_by_steps, sample_images_by_steps) where sample_images maps steps -> "output" tensor.
     """
     was_training = model.training
     model.eval()
@@ -127,14 +129,17 @@ def evaluate_multi_step_fid(
     remaining = num_samples
     compute_real = real_stats is None
     real_feat_batches: list[torch.Tensor] = []
+    z_h_store: list[torch.Tensor] = []
     shapes: list[tuple[int, int, int, int]] = []
 
     for batch in loader:
         if remaining <= 0:
             break
         z_l = batch["z_L"][:remaining].to(device)
+        z_h = batch["z_H"][:remaining].to(device)
         if compute_real:
-            real_feat_batches.append(fid_model(decode_latents(vae, reconstruct_low_freq(z_l))))
+            real_feat_batches.append(fid_model(decode_latents(vae, reconstruct_from_decomposition(z_l, z_h))))
+        z_h_store.append(z_h.cpu())
         shapes.append((z_l.shape[0], model.in_channels, model.resolution, model.resolution))
         remaining -= z_l.shape[0]
 
@@ -148,9 +153,10 @@ def evaluate_multi_step_fid(
         fake_feat_batches: list[torch.Tensor] = []
         imgs_collected: list[torch.Tensor] = []
         n_collected = 0
-        for shape in shapes:
+        for z_h_cpu, shape in zip(z_h_store, shapes):
+            z_h = z_h_cpu.to(device)
             z_l_fake = sample_macro_latents(model, shape=shape, method=sampler, num_steps=steps, device=str(device))
-            imgs = decode_latents(vae, reconstruct_low_freq(z_l_fake))
+            imgs = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, z_h))
             fake_feat_batches.append(fid_model(imgs))
             if n_collected < num_sample_images:
                 imgs_collected.append(imgs.cpu())
@@ -158,7 +164,7 @@ def evaluate_multi_step_fid(
         fid_results[steps] = calculate_fid(real_stats, stats_from_feature_batches(fake_feat_batches))
         if imgs_collected:
             sample_components[steps] = {
-                "low_freq": torch.cat(imgs_collected, dim=0)[:num_sample_images],
+                "output": torch.cat(imgs_collected, dim=0)[:num_sample_images],
             }
 
     if was_training:
@@ -331,6 +337,7 @@ def main() -> None:
     fid_model = None
     fid_dataset = None
     precomputed_fid_stats = None
+    sample_z_h: torch.Tensor | None = None
     if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
         vae_cfg = config.get("vae", {})
         vae = load_sd_vae(
@@ -340,6 +347,9 @@ def main() -> None:
             device=str(accelerator.device),
         )
         fid_dataset = CachedMicroLatentDataset(latent_dir)
+        _tmp = DataLoader(fid_dataset, batch_size=num_sample_images, shuffle=False, num_workers=0)
+        sample_z_h = next(iter(_tmp))["z_H"][:num_sample_images].to(accelerator.device)
+        del _tmp
         if fid_every > 0:
             fid_model = InceptionFID(accelerator.device)
             fid_stats_path = evaluation_cfg.get("fid_stats")
@@ -405,7 +415,7 @@ def main() -> None:
                     )
                 accelerator.print(message)
 
-            if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and vae is not None:
+            if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process and tracker == "wandb" and sample_z_h is not None:
                 import wandb
                 eval_model = accelerator.unwrap_model(model)
                 backup = None
@@ -419,7 +429,7 @@ def main() -> None:
                 eval_model.eval()
                 wandb_imgs: dict[str, list] = {}
                 with torch.no_grad():
-                    n = num_sample_images
+                    n = sample_z_h.shape[0]
                     shape = (n, eval_model.in_channels, eval_model.resolution, eval_model.resolution)
                     for s in fid_sampler_steps:
                         z_l_fake = sample_macro_latents(
@@ -429,8 +439,8 @@ def main() -> None:
                             num_steps=s,
                             device=str(accelerator.device),
                         )
-                        imgs = decode_latents(vae, reconstruct_low_freq(z_l_fake)).cpu()
-                        wandb_imgs[f"samples/low_freq_{s}step"] = [
+                        imgs = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, sample_z_h)).cpu()
+                        wandb_imgs[f"samples/output_{s}step"] = [
                             wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
                             for img in imgs
                         ]
