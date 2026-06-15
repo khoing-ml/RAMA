@@ -256,6 +256,9 @@ def sample_and_save_images(
     for i in range(num_images):
         imgs.extend([img_macro[i], img_micro[i], img_real[i]])
     grid = make_grid(torch.stack(imgs), nrow=3, normalize=True, value_range=(-1, 1))
+    macro_grid = make_grid(img_macro, nrow=max(1, int(num_images ** 0.5)), normalize=True, value_range=(-1, 1))
+    micro_grid = make_grid(img_micro, nrow=max(1, int(num_images ** 0.5)), normalize=True, value_range=(-1, 1))
+    real_grid  = make_grid(img_real,  nrow=max(1, int(num_images ** 0.5)), normalize=True, value_range=(-1, 1))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(grid, out_path)
@@ -265,7 +268,7 @@ def sample_and_save_images(
     if micro_was_training:
         micro_model.train()
 
-    return grid
+    return grid, macro_grid, micro_grid, real_grid
 
 
 def load_or_make_bases(config: dict[str, object], override_path: str | None = None) -> torch.Tensor:
@@ -549,7 +552,13 @@ def main() -> None:
                     )
                     if tracker == "wandb":
                         import wandb
-                        accelerator.log({"samples/comparison": wandb.Image(grid)}, step=step)
+                        grid, macro_grid, micro_grid, real_grid = grid
+                        accelerator.log({
+                            "samples/comparison": wandb.Image(grid),
+                            "samples/macro_grid": wandb.Image(macro_grid),
+                            "samples/micro_grid": wandb.Image(micro_grid),
+                            "samples/real_grid":  wandb.Image(real_grid),
+                        }, step=step)
                     accelerator.print(f"step={step} samples saved to {out_path}")
                     context_encoder.train()
                     micro_model.train()
