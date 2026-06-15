@@ -4,7 +4,7 @@ dataset:
   image_size: 256
 
 latents:
-  output_dir: data/latents
+  output_dir: /content/drive/MyDrive/RAMA/latents_256/data/latents
 
 vae:
   checkpoint_id: stabilityai/sd-vae-ft-mse
@@ -14,23 +14,13 @@ vae:
   device: cuda
 
 micro_latent:
-  residual_shape: [12, 16, 16]
-  patch_size: 2
-  patch_grid: [8, 8]
-  num_patches: 64
-  patch_dim: 48
+  residual_shape: [4, 32, 32]
+  patch_size: 4
+  # patch_dim auto-derived: C * patch_size^2
 
 rama_bases:
-  cache_path: cache/rama_bases_p64_d48.pt
-  num_patches: 64
-  patch_dim: 48
   seed: 1234
-
-rama:
-  bases_path: cache/rama_bases_p64_d48.pt
-  patch_size: 2
-  num_patches: 64
-  patch_dim: 48
+  # cache_path auto-derived: cache/rama_bases_p{num_patches}_d{patch_dim}.pt
 
 tokenizer:
   config_path: cache/rama_tokenizer_config.pt
@@ -47,15 +37,14 @@ context_encoder:
   num_layers: 4
   dropout: 0.05
   positional_embedding: true
-  grid_size: [16, 16]
   context_noise_sigma: 0.0
+  # grid_size auto-derived from patch_size and residual_shape
 
 micro:
   type: categorical
   architecture: transformer
   context_dim: 256
-  patch_dim: 48
-  dim_emb_dim: 64
+  # patch_dim auto-derived
   hidden_dim: 512
   num_layers: 4
   transformer_dim: 512
@@ -66,26 +55,11 @@ micro:
   num_bins: 256
   loss: cross_entropy
 
-micro_rama_net:
-  type: categorical
-  architecture: transformer
-  context_dim: 256
-  patch_dim: 48
-  dim_emb_dim: 64
-  hidden_dim: 512
-  num_layers: 4
-  transformer_dim: 512
-  spatial_layers: 3
-  coord_layers: 2
-  num_heads: 8
-  dropout: 0.05
-  num_bins: 256
-
 micro_continuous:
   type: nflows
   enabled: false
   context_dim: 256
-  patch_dim: 48
+  # patch_dim auto-derived
   dim_emb_dim: 64
   hidden_dim: 512
   num_layers: 4
@@ -94,14 +68,14 @@ micro_continuous:
   loss: negative_log_likelihood
 
 training:
-  batch_size_per_gpu: 64
-  num_gpus: 2
+  batch_size_per_gpu: 128
+  num_gpus: 1
   gradient_accumulation_steps: 1
   optimizer: AdamW
   learning_rate: 2.0e-4
   betas: [0.9, 0.999]
   weight_decay: 1.0e-4
-  precision: fp16
+  precision: bf16
   total_steps: 200000
   grad_clip: 1.0
 

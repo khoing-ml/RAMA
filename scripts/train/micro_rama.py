@@ -49,6 +49,41 @@ def load_config(path: str | Path) -> dict[str, object]:
         return yaml.safe_load(handle)
 
 
+def resolve_derived_config(config: dict[str, object]) -> dict[str, object]:
+    """Auto-compute all values that follow from micro_latent.patch_size and residual_shape."""
+    micro_latent = config.setdefault("micro_latent", {})
+    residual_shape = list(micro_latent.get("residual_shape", [4, 32, 32]))
+    patch_size = int(micro_latent.get("patch_size", 2))
+    C, H, W = residual_shape
+    patch_grid = [H // patch_size, W // patch_size]
+    num_patches = patch_grid[0] * patch_grid[1]
+    patch_dim = int(micro_latent.get("patch_dim", C * patch_size * patch_size))
+
+    micro_latent["patch_grid"] = patch_grid
+    micro_latent["num_patches"] = num_patches
+
+    rama_bases = config.setdefault("rama_bases", {})
+    rama_bases["num_patches"] = num_patches
+    rama_bases["patch_dim"] = patch_dim
+    auto_cache = f"cache/rama_bases_p{num_patches}_d{patch_dim}.pt"
+    rama_bases.setdefault("cache_path", auto_cache)
+
+    rama = config.setdefault("rama", {})
+    rama["patch_size"] = patch_size
+    rama["num_patches"] = num_patches
+    rama["patch_dim"] = patch_dim
+    rama.setdefault("bases_path", rama_bases["cache_path"])
+
+    context_encoder = config.setdefault("context_encoder", {})
+    context_encoder["grid_size"] = patch_grid
+
+    config.setdefault("micro", {})["patch_dim"] = patch_dim
+    if config.get("micro_continuous"):
+        config["micro_continuous"]["patch_dim"] = patch_dim
+
+    return config
+
+
 def checkpoint_path(out_dir: Path, step: int) -> Path:
     return out_dir / "checkpoints" / f"step_{step:08d}.pt"
 
@@ -189,7 +224,7 @@ def load_tokenizer(config: dict[str, object], override_path: str | None = None) 
 
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config = resolve_derived_config(load_config(args.config))
     training = config.get("training", {})
     logging_cfg = config.get("logging", {})
     evaluation_cfg = config.get("evaluation", {})
@@ -233,7 +268,11 @@ def main() -> None:
     config["micro_type"] = micro_type
 
     tokenizer = load_tokenizer(tokenizer_cfg, args.tokenizer_config) if micro_type == "categorical" else None
-    context_encoder = build_context_encoder(config.get("context_encoder", {}))
+    patch_size = int(micro_latent_cfg.get("patch_size", 2))
+    context_encoder_cfg = dict(config.get("context_encoder", {}))
+    # CE patch_size is always micro patch_size // 2 because z_L is 2x downsampled from z_H
+    context_encoder_cfg["patch_size"] = patch_size // 2
+    context_encoder = build_context_encoder(context_encoder_cfg)
     if micro_type == "categorical":
         micro_model = build_categorical_micro_rama_net(
             config.get("micro", config.get("micro_rama_net", {})),
@@ -270,7 +309,6 @@ def main() -> None:
     if accelerator.is_main_process and tracker == "wandb":
         accelerator.init_trackers(project_name=str(logging_cfg.get("project", "rama")), config=config)
 
-    patch_size = int(micro_latent_cfg.get("patch_size", 2))
     context_noise_sigma = float(config.get("context_encoder", {}).get("context_noise_sigma", 0.03))
     grad_clip = float(training.get("grad_clip", 1.0))
     total_steps = args.max_steps or int(training.get("total_steps", 200000))

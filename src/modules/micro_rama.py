@@ -76,6 +76,7 @@ class ContextEncoder(nn.Module):
         context_dim: int = 256,
         hidden_channels: int = 128,
         num_layers: int = 3,
+        patch_size: int = 1,
         use_position_embedding: bool = True,
         grid_size: tuple[int, int] = (16, 16),
         architecture: str = "conv",
@@ -89,6 +90,8 @@ class ContextEncoder(nn.Module):
             raise ValueError("num_layers must be at least 1")
         if vit_layers < 1:
             raise ValueError("vit_layers must be at least 1")
+        if patch_size < 1:
+            raise ValueError("patch_size must be at least 1")
         architecture = {"cnn": "conv", "tiny_vit": "vit", "transformer": "vit", "resnet": "resnet"}.get(architecture, architecture)
         if architecture not in {"conv", "vit", "resnet"}:
             raise ValueError(f"unsupported context encoder architecture: {architecture}")
@@ -100,7 +103,8 @@ class ContextEncoder(nn.Module):
         )
 
         if architecture == "vit":
-            self.input_proj = nn.Conv2d(in_channels, context_dim, kernel_size=1)
+            # patch_size > 1 merges z_L pixels into fewer, larger tokens
+            self.input_proj = nn.Conv2d(in_channels, context_dim, kernel_size=patch_size, stride=patch_size)
             self.transformer_blocks = nn.Sequential(
                 *[
                     ContextTransformerBlock(
@@ -116,16 +120,19 @@ class ContextEncoder(nn.Module):
             return
 
         if architecture == "resnet":
-            self.net = nn.Sequential(
+            layers: list[nn.Module] = [
                 nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
                 *[ResConvBlock(hidden_channels) for _ in range(num_layers)],
                 group_norm(hidden_channels),
                 nn.SiLU(),
                 nn.Conv2d(hidden_channels, context_dim, kernel_size=1),
-            )
+            ]
+            if patch_size > 1:
+                layers.append(nn.AvgPool2d(patch_size))
+            self.net = nn.Sequential(*layers)
             return
 
-        layers: list[nn.Module] = []
+        layers = []
         channels = in_channels
         for _ in range(num_layers - 1):
             layers.extend(
@@ -137,6 +144,8 @@ class ContextEncoder(nn.Module):
             )
             channels = hidden_channels
         layers.append(nn.Conv2d(channels, context_dim, kernel_size=3, padding=1))
+        if patch_size > 1:
+            layers.append(nn.AvgPool2d(patch_size))
         self.net = nn.Sequential(*layers)
 
     def forward(self, z_l: torch.Tensor) -> torch.Tensor:
@@ -259,6 +268,7 @@ def build_context_encoder(config: dict[str, object]) -> ContextEncoder:
         context_dim=int(config.get("context_dim", 256)),
         hidden_channels=int(config.get("hidden_channels", 128)),
         num_layers=int(config.get("num_layers", 3)),
+        patch_size=int(config.get("patch_size", 1)),
         use_position_embedding=bool(config.get("positional_embedding", True)),
         grid_size=(int(grid[0]), int(grid[1])),
         architecture=str(config.get("architecture", "conv")),

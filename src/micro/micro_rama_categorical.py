@@ -48,7 +48,6 @@ class CategoricalMicroRAMANet(nn.Module):
         self,
         context_dim: int = 256,
         patch_dim: int = 16,
-        dim_emb_dim: int = 64,
         hidden_dim: int = 512,
         num_bins: int = 256,
         num_layers: int = 4,
@@ -73,7 +72,6 @@ class CategoricalMicroRAMANet(nn.Module):
         self.patch_dim = patch_dim
         self.num_bins = num_bins
         self.architecture = architecture
-        self.dim_embed = nn.Embedding(patch_dim, dim_emb_dim)
 
         if architecture == "transformer":
             model_dim = int(transformer_dim or hidden_dim)
@@ -94,6 +92,8 @@ class CategoricalMicroRAMANet(nn.Module):
             )
             return
 
+        dim_emb_dim = 64
+        self.dim_embed = nn.Embedding(patch_dim, dim_emb_dim)
         layers: list[nn.Module] = []
         input_dim = context_dim + dim_emb_dim
         for layer_idx in range(num_layers):
@@ -142,7 +142,6 @@ def build_categorical_micro_rama_net(config: dict[str, object], num_bins: int | 
     return CategoricalMicroRAMANet(
         context_dim=int(config.get("context_dim", 256)),
         patch_dim=int(config.get("patch_dim", 16)),
-        dim_emb_dim=int(config.get("dim_emb_dim", 64)),
         hidden_dim=int(config.get("hidden_dim", 512)),
         num_bins=int(num_bins or config.get("num_bins", 256)),
         num_layers=int(config.get("num_layers", 4)),
