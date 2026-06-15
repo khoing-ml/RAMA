@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
-from src.dataset.latent_decomposition import reconstruct_from_decomposition
+from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.micro.loss import categorical_micro_loss, categorical_micro_metrics, continuous_micro_nll_loss
 from src.micro.micro_rama_categorical import build_categorical_micro_rama_net
@@ -196,6 +197,73 @@ def evaluate_micro_fid(
     return calculate_fid(stats_from_feature_batches(real_batches), stats_from_feature_batches(fake_batches))
 
 
+@torch.no_grad()
+def sample_and_save_images(
+    context_encoder: torch.nn.Module,
+    micro_model: torch.nn.Module,
+    dataset: CachedMicroLatentDataset,
+    vae: torch.nn.Module,
+    projector: RAMAProjector,
+    tokenizer: RAMATokenizer | None,
+    micro_type: str,
+    num_images: int,
+    patch_size: int,
+    temperature: float,
+    use_argmax: bool,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+    out_path: Path,
+) -> torch.Tensor:
+    """Save a comparison grid (macro-only | micro-reconstruction | ground-truth) and return it."""
+    from torchvision.utils import make_grid, save_image
+
+    context_was_training = context_encoder.training
+    micro_was_training = micro_model.training
+    context_encoder.eval()
+    micro_model.eval()
+
+    num_images = min(num_images, len(dataset))
+    samples = [dataset[i] for i in range(num_images)]
+    z_l = torch.stack([s["z_L"] for s in samples]).to(device)
+    z_h = torch.stack([s["z_H"] for s in samples]).to(device)
+
+    autocast_ctx = torch.autocast(device_type=device.type, dtype=autocast_dtype) if autocast_dtype else torch.autocast(device_type=device.type, enabled=False)
+    with autocast_ctx:
+        context = context_encoder(z_l)
+        if micro_type == "categorical":
+            if tokenizer is None:
+                raise RuntimeError("categorical sampling requires a RAMATokenizer")
+            logits = micro_model(context)
+            tokens = sample_tokens(logits, temperature=temperature, use_argmax=use_argmax)
+            y_hat = tokenizer.dequantize(tokens)
+            patches_hat = projector.inverse(y_hat)
+            z_h_hat = unpatchify(patches_hat, channels=z_h.shape[1], height=z_h.shape[2], width=z_h.shape[3], patch_size=patch_size)
+        else:
+            z_h_hat = sample_micro_latent(z_l, context_encoder, micro_model, projector.bases,
+                                           latent_channels=z_h.shape[1], latent_height=z_h.shape[2],
+                                           latent_width=z_h.shape[3], patch_size=patch_size)
+
+    img_macro = decode_latents(vae, reconstruct_low_freq(z_l))
+    img_micro = decode_latents(vae, reconstruct_from_decomposition(z_l, z_h_hat))
+    img_real  = decode_latents(vae, reconstruct_from_decomposition(z_l, z_h))
+
+    # interleave columns: macro | micro | real per row
+    imgs = []
+    for i in range(num_images):
+        imgs.extend([img_macro[i], img_micro[i], img_real[i]])
+    grid = make_grid(torch.stack(imgs), nrow=3, normalize=True, value_range=(-1, 1))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    save_image(grid, out_path)
+
+    if context_was_training:
+        context_encoder.train()
+    if micro_was_training:
+        micro_model.train()
+
+    return grid
+
+
 def load_or_make_bases(config: dict[str, object], override_path: str | None = None) -> torch.Tensor:
     basis_path = Path(str(override_path or config.get("cache_path", config.get("bases_path", "cache/rama_bases_p256_d16.pt"))))
     if basis_path.exists():
@@ -222,7 +290,22 @@ def load_tokenizer(config: dict[str, object], override_path: str | None = None) 
     )
 
 
+def _relaunch_with_accelerate(config: dict[str, object]) -> None:
+    """Re-exec under accelerate launch using num_gpus and precision from config."""
+    training = config.get("training", {})
+    num_processes = int(training.get("num_gpus", 1))
+    precision = str(training.get("precision", "no"))
+    if precision not in {"fp16", "bf16"}:
+        precision = "no"
+    args = ["accelerate", "launch", f"--num_processes={num_processes}", f"--mixed_precision={precision}"]
+    if num_processes > 1:
+        args.append("--multi_gpu")
+    os.execvp("accelerate", args + sys.argv)
+
+
 def main() -> None:
+    if "LOCAL_RANK" not in os.environ:
+        _relaunch_with_accelerate(load_config(parse_args().config))
     args = parse_args()
     config = resolve_derived_config(load_config(args.config))
     training = config.get("training", {})
@@ -319,9 +402,12 @@ def main() -> None:
     fid_batch_size = int(evaluation_cfg.get("fid_batch_size", min(batch_size, 32)))
     fid_temperature = float(evaluation_cfg.get("temperature", 1.0))
     fid_use_argmax = bool(evaluation_cfg.get("use_argmax", False))
+    sample_every = int(logging_cfg.get("sample_every_steps", 0))
+    num_sample_images = int(logging_cfg.get("num_sample_images", 8))
+    autocast_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(mixed_precision)
     vae = None
     fid_model = None
-    if accelerator.is_main_process and fid_every > 0:
+    if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
         vae_cfg = config.get("vae", {})
         vae = load_sd_vae(
             checkpoint=resolve_vae_checkpoint(vae_cfg),
@@ -329,6 +415,7 @@ def main() -> None:
             dtype=str(vae_cfg.get("dtype", "fp16")),
             device=str(accelerator.device),
         )
+    if accelerator.is_main_process and fid_every > 0:
         fid_model = InceptionFID(accelerator.device)
 
     step = start_step
@@ -417,6 +504,30 @@ def main() -> None:
                 loss_accum = 0.0
                 metric_accum.clear()
                 metric_count = 0
+
+            if sample_every > 0 and step % sample_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    out_path = out_dir / "samples" / f"step_{step:08d}.png"
+                    grid = sample_and_save_images(
+                        accelerator.unwrap_model(context_encoder),
+                        accelerator.unwrap_model(micro_model),
+                        dataset, vae, projector, tokenizer, micro_type,
+                        num_images=num_sample_images,
+                        patch_size=patch_size,
+                        temperature=fid_temperature,
+                        use_argmax=fid_use_argmax,
+                        device=accelerator.device,
+                        autocast_dtype=autocast_dtype,
+                        out_path=out_path,
+                    )
+                    if tracker == "wandb":
+                        import wandb
+                        accelerator.log({"samples/comparison": wandb.Image(grid)}, step=step)
+                    accelerator.print(f"step={step} samples saved to {out_path}")
+                    context_encoder.train()
+                    micro_model.train()
+                accelerator.wait_for_everyone()
 
             if fid_every > 0 and step % fid_every == 0:
                 accelerator.wait_for_everyone()

@@ -88,11 +88,13 @@ logging:
   entity: null
   run_name: celeba256-sdvae-high-rama
   log_every_steps: 100
-  checkpoint_every_steps: 10000
+  checkpoint_every_steps: 5000
+  sample_every_steps: 1000
+  num_sample_images: 8
 
 evaluation:
-  fid_every_steps: 10000
-  fid_num_samples: 1024
+  fid_every_steps: 5000
+  fid_num_samples: 5000
   fid_batch_size: 32
   temperature: 1.0
   use_argmax: false
