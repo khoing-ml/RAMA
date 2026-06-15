@@ -71,7 +71,7 @@ micro_continuous:
   loss: negative_log_likelihood
 
 training:
-  batch_size_per_gpu: 64
+  batch_size_per_gpu: 128
   num_gpus: 1
   gradient_accumulation_steps: 2
   optimizer: AdamW

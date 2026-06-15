@@ -6,9 +6,12 @@ import os
 import sys
 from pathlib import Path
 
+import math
+
 import torch
 import yaml
 from accelerate import Accelerator
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -103,18 +106,19 @@ def save_checkpoint(
     micro_model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     config: dict[str, object],
+    scheduler: object | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "step": step,
-            "context_encoder": context_encoder.state_dict(),
-            "micro_model": micro_model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "config": config,
-        },
-        path,
-    )
+    ckpt = {
+        "step": step,
+        "context_encoder": context_encoder.state_dict(),
+        "micro_model": micro_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": config,
+    }
+    if scheduler is not None:
+        ckpt["scheduler"] = scheduler.state_dict()
+    torch.save(ckpt, path)
 
 
 def sample_tokens(logits: torch.Tensor, temperature: float, use_argmax: bool) -> torch.Tensor:
@@ -373,11 +377,23 @@ def main() -> None:
     rama_cfg = config.get("rama", config.get("rama_bases", {}))
     bases = load_or_make_bases(rama_cfg, args.bases)
 
-    context_encoder, micro_model, optimizer, dataloader = accelerator.prepare(
+    total_steps_for_sched = int(training.get("total_steps", 200000))
+    warmup_steps = int(training.get("warmup_steps", total_steps_for_sched // 20))
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return current_step / max(warmup_steps, 1)
+        progress = (current_step - warmup_steps) / max(total_steps_for_sched - warmup_steps, 1)
+        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = LambdaLR(optimizer, lr_lambda)
+
+    context_encoder, micro_model, optimizer, dataloader, scheduler = accelerator.prepare(
         context_encoder,
         micro_model,
         optimizer,
         dataloader,
+        scheduler,
     )
     projector = RAMAProjector(bases).to(accelerator.device)
     projector.requires_grad_(False)
@@ -388,6 +404,8 @@ def main() -> None:
         accelerator.unwrap_model(context_encoder).load_state_dict(checkpoint["context_encoder"])
         accelerator.unwrap_model(micro_model).load_state_dict(checkpoint["micro_model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler"])
         start_step = int(checkpoint["step"])
 
     if accelerator.is_main_process and tracker == "wandb":
@@ -467,6 +485,7 @@ def main() -> None:
                 else:
                     grad_norm = torch.tensor(0.0, device=accelerator.device)
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
             step += 1
@@ -486,6 +505,7 @@ def main() -> None:
                     "train/loss_last": loss.detach().float().item(),
                     "train/grad_norm": float(grad_norm),
                     "train/y_abs_mean": y.detach().abs().float().mean().item(),
+                    "train/lr": scheduler.get_last_lr()[0],
                 }
                 if micro_type == "categorical":
                     for name in sorted(metric_accum):
@@ -568,6 +588,7 @@ def main() -> None:
                     accelerator.unwrap_model(micro_model),
                     optimizer,
                     copy.deepcopy(config),
+                    scheduler=scheduler,
                 )
 
     accelerator.wait_for_everyone()
@@ -579,6 +600,7 @@ def main() -> None:
             accelerator.unwrap_model(micro_model),
             optimizer,
             copy.deepcopy(config),
+            scheduler=scheduler,
         )
     accelerator.end_training()
 
