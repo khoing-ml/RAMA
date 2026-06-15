@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.evaluation.fid import InceptionFID, calculate_fid, stats_from_feature_batches
+from src.evaluation.fid import FIDStats, InceptionFID, calculate_fid, stats_from_feature_batches
 from src.dataset.latent_decomposition import reconstruct_from_decomposition, reconstruct_low_freq
 from src.dataset.latent_dataset import CachedMicroLatentDataset
 from src.micro.loss import categorical_micro_loss, categorical_micro_metrics, continuous_micro_nll_loss
@@ -147,6 +147,7 @@ def evaluate_micro_fid(
     temperature: float,
     use_argmax: bool,
     device: torch.device,
+    real_stats: FIDStats | None = None,
 ) -> float:
     context_was_training = context_encoder.training
     micro_was_training = micro_model.training
@@ -162,7 +163,9 @@ def evaluate_micro_fid(
             break
         z_l = batch["z_L"][:remaining].to(device)
         z_h = batch["z_H"][:remaining].to(device)
-        z_real = reconstruct_from_decomposition(z_l, z_h)
+        if real_stats is None:
+            z_real = reconstruct_from_decomposition(z_l, z_h)
+            real_batches.append(fid_model(decode_latents(vae, z_real)))
         if micro_type == "categorical":
             if tokenizer is None:
                 raise RuntimeError("categorical micro FID requires a RAMATokenizer")
@@ -190,7 +193,6 @@ def evaluate_micro_fid(
                 patch_size=patch_size,
             )
         z_fake = reconstruct_from_decomposition(z_l, z_h_hat)
-        real_batches.append(fid_model(decode_latents(vae, z_real)))
         fake_batches.append(fid_model(decode_latents(vae, z_fake)))
         remaining -= z_l.shape[0]
 
@@ -198,7 +200,8 @@ def evaluate_micro_fid(
         context_encoder.train()
     if micro_was_training:
         micro_model.train()
-    return calculate_fid(stats_from_feature_batches(real_batches), stats_from_feature_batches(fake_batches))
+    computed_real = real_stats if real_stats is not None else stats_from_feature_batches(real_batches)
+    return calculate_fid(computed_real, stats_from_feature_batches(fake_batches))
 
 
 @torch.no_grad()
@@ -432,6 +435,20 @@ def main() -> None:
     sample_every = int(logging_cfg.get("sample_every_steps", 0))
     num_sample_images = int(logging_cfg.get("num_sample_images", 8))
     autocast_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(mixed_precision)
+    precomputed_real_stats: FIDStats | None = None
+    if accelerator.is_main_process and fid_every > 0:
+        fid_stats_path = evaluation_cfg.get("fid_stats")
+        if fid_stats_path:
+            p = Path(fid_stats_path)
+            if p.exists():
+                data = torch.load(p, map_location="cpu")
+                precomputed_real_stats = FIDStats(
+                    mean=data["mean"], covariance=data["covariance"], num_samples=data["num_samples"]
+                )
+                accelerator.print(f"Loaded precomputed real FID stats from {p} ({precomputed_real_stats.num_samples} samples)")
+            else:
+                accelerator.print(f"WARNING: evaluation.fid_stats path {fid_stats_path!r} not found; will compute real stats each eval")
+
     vae = None
     fid_model = None
     if accelerator.is_main_process and (fid_every > 0 or sample_every > 0):
@@ -582,6 +599,7 @@ def main() -> None:
                         temperature=fid_temperature,
                         use_argmax=fid_use_argmax,
                         device=accelerator.device,
+                        real_stats=precomputed_real_stats,
                     )
                     accelerator.log({"eval/fid_micro_real_zL": fid}, step=step)
                     accelerator.print(f"step={step} fid_micro_real_zL={fid:.4f}")

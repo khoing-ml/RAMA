@@ -94,5 +94,6 @@ evaluation:
   fid_every_steps: 5000
   fid_num_samples: 5000
   fid_batch_size: 32
+  fid_stats: /content/drive/MyDrive/RAMA/fid_stats_celeba256_5k.pt
   temperature: 1.0
   use_argmax: false

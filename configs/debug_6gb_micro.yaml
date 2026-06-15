@@ -95,5 +95,6 @@ evaluation:
   fid_every_steps: 0
   fid_num_samples: 8
   fid_batch_size: 2
+  fid_stats: cache/fid_stats_debug.pt
   temperature: 1.0
   use_argmax: false
