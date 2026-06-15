@@ -391,7 +391,12 @@ def main() -> None:
         start_step = int(checkpoint["step"])
 
     if accelerator.is_main_process and tracker == "wandb":
-        accelerator.init_trackers(project_name=str(logging_cfg.get("project", "rama")), config=config)
+        run_name = logging_cfg.get("run_name")
+        accelerator.init_trackers(
+            project_name=str(logging_cfg.get("project", "rama")),
+            config=config,
+            init_kwargs={"wandb": {"name": run_name}} if run_name else {},
+        )
 
     context_noise_sigma = float(config.get("context_encoder", {}).get("context_noise_sigma", 0.03))
     grad_clip = float(training.get("grad_clip", 1.0))
