@@ -333,6 +333,7 @@ def evaluate_val_loss(
 
     total_loss = 0.0
     metric_accum: dict[str, float] = {}
+    dim_acc_accum: torch.Tensor | None = None
     count = 0
 
     autocast_ctx = (
@@ -353,6 +354,10 @@ def evaluate_val_loss(
                 loss = categorical_micro_loss(logits, tokens, num_bins=tokenizer.num_bins)
                 metrics = categorical_micro_metrics(logits, tokens, num_bins=tokenizer.num_bins)
                 for k, v in metrics.items():
+                    if k == "per_dim_token_acc":
+                        per_dim = v.detach().cpu()
+                        dim_acc_accum = per_dim if dim_acc_accum is None else dim_acc_accum + per_dim
+                        continue
                     metric_accum[k] = metric_accum.get(k, 0.0) + v.float().item()
             else:
                 eps, logabsdet = micro_model(y, context)
@@ -372,6 +377,10 @@ def evaluate_val_loss(
     result: dict[str, float] = {"val/loss": total_loss / n}
     for k, v in metric_accum.items():
         result[f"val/{k}"] = v / n
+    if dim_acc_accum is not None:
+        per_dim_mean = dim_acc_accum / n
+        result["val/token_acc_dim_first8"] = per_dim_mean[:8].mean().item()
+        result["val/token_acc_dim_last8"] = per_dim_mean[-8:].mean().item()
     return result
 
 
@@ -549,6 +558,8 @@ def main() -> None:
     loss_accum = 0.0
     metric_accum: dict[str, float] = {}
     metric_count = 0
+    dim_acc_accum: torch.Tensor | None = None
+    dim_acc_count = 0
 
     while step < total_steps:
         for batch in dataloader:
@@ -594,6 +605,11 @@ def main() -> None:
             metric_count += 1
             if micro_type == "categorical":
                 for name, value in token_metrics.items():
+                    if name == "per_dim_token_acc":
+                        per_dim = value.detach().cpu()
+                        dim_acc_accum = per_dim if dim_acc_accum is None else dim_acc_accum + per_dim
+                        dim_acc_count += 1
+                        continue
                     metric_accum[name] = metric_accum.get(name, 0.0) + value.detach().float().item()
             else:
                 metric_accum["logabsdet_mean"] = (
@@ -611,6 +627,10 @@ def main() -> None:
                 if micro_type == "categorical":
                     for name in sorted(metric_accum):
                         logs[f"train/{name}"] = metric_accum[name] / max(metric_count, 1)
+                    if dim_acc_accum is not None and dim_acc_count > 0:
+                        per_dim_mean = dim_acc_accum / dim_acc_count
+                        logs["train/token_acc_dim_first8"] = per_dim_mean[:8].mean().item()
+                        logs["train/token_acc_dim_last8"] = per_dim_mean[-8:].mean().item()
                 else:
                     logs["train/logabsdet_mean"] = metric_accum["logabsdet_mean"] / max(metric_count, 1)
                 accelerator.log(logs, step=step)
@@ -624,6 +644,8 @@ def main() -> None:
                         f" token_acc={logs['train/token_acc']:.4f} "
                         f"top5={logs['train/token_top5_acc']:.4f} "
                         f"within1={logs['train/token_within_1']:.4f}"
+                        f" dim_first8={logs.get('train/token_acc_dim_first8', 0):.4f}"
+                        f" dim_last8={logs.get('train/token_acc_dim_last8', 0):.4f}"
                     )
                 else:
                     message += f" logabsdet_mean={logs['train/logabsdet_mean']:.4f}"
@@ -631,6 +653,8 @@ def main() -> None:
                 loss_accum = 0.0
                 metric_accum.clear()
                 metric_count = 0
+                dim_acc_accum = None
+                dim_acc_count = 0
 
             if sample_every > 0 and step % sample_every == 0:
                 accelerator.wait_for_everyone()

@@ -28,12 +28,15 @@ def categorical_micro_metrics(logits: torch.Tensor, tokens: torch.Tensor, num_bi
     pred = logits.argmax(dim=-1)
     token_hist = torch.bincount(tokens.reshape(-1), minlength=num_bins).float()
     token_probs = token_hist / token_hist.sum().clamp_min(1.0)
+    correct = (pred == tokens).float()
     metrics = {
-        "token_acc": (pred == tokens).float().mean(),
+        "token_acc": correct.mean(),
         "token_within_1": ((pred - tokens).abs() <= 1).float().mean(),
         "token_within_2": ((pred - tokens).abs() <= 2).float().mean(),
         "token_entropy": -(token_probs.clamp_min(1e-12) * token_probs.clamp_min(1e-12).log()).sum(),
         "token_clip_fraction": ((tokens == 0) | (tokens == num_bins - 1)).float().mean(),
+        # per-dim accuracy averaged over batch and patches: shape [patch_dim]
+        "per_dim_token_acc": correct.mean(dim=list(range(correct.ndim - 1))),
     }
     for k in (5, 10):
         topk = min(k, num_bins)
