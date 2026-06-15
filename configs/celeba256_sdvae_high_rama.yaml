@@ -1,6 +1,6 @@
 dataset:
   name: celeba256
-  root: data/celeba256
+  root: /content/drive/MyDrive/RAMA/celeba_hq_256/celeba_hq_256
   image_size: 256
 
 latents:
@@ -19,7 +19,7 @@ micro_latent:
   # patch_dim auto-derived: C * patch_size^2
 
 output:
-  dir: outputs/micro_rama_high
+  dir: /content/drive/MyDrive/RAMA/outputs/
 
 rama_bases:
   seed: 1234
