@@ -45,11 +45,14 @@ context_encoder:
 
 micro:
   type: categorical
-  architecture: mlp
+  architecture: transformer
   context_dim: 256
   # patch_dim auto-derived
+  transformer_dim: 512
   hidden_dim: 512
-  num_layers: 4
+  num_heads: 8
+  spatial_layers: 4
+  coord_layers: 2
   dim_emb_dim: 64
   dropout: 0.05
   num_bins: 256

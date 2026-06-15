@@ -293,11 +293,15 @@ def load_or_make_bases(config: dict[str, object], override_path: str | None = No
 def load_tokenizer(config: dict[str, object], override_path: str | None = None) -> RAMATokenizer:
     config_path = Path(str(override_path or config.get("config_path", "cache/rama_tokenizer_config.pt")))
     if config_path.exists():
-        return build_tokenizer_from_config(load_tokenizer_config(str(config_path)))
-    return RAMATokenizer(
+        tok = build_tokenizer_from_config(load_tokenizer_config(str(config_path)))
+        print(f"[tokenizer] loaded from {config_path}  num_bins={tok.num_bins}  bound={tok.bound:.4f}")
+        return tok
+    tok = RAMATokenizer(
         num_bins=int(config.get("num_bins", 256)),
         bound=float(config.get("bound", 3.0)),
     )
+    print(f"[tokenizer] WARNING: no calibrated config found at {config_path}, using default bound={tok.bound:.4f} — run scripts/dev/estimate_quant_bound.py first")
+    return tok
 
 
 def _relaunch_with_accelerate(config: dict[str, object]) -> None:
