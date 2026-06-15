@@ -12,7 +12,7 @@ import torch
 import yaml
 from accelerate import Accelerator
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -314,6 +314,67 @@ def _relaunch_with_accelerate(config: dict[str, object]) -> None:
     os.execvp("accelerate", args + sys.argv)
 
 
+@torch.no_grad()
+def evaluate_val_loss(
+    context_encoder: torch.nn.Module,
+    micro_model: torch.nn.Module,
+    val_loader: DataLoader,
+    projector: RAMAProjector,
+    tokenizer: RAMATokenizer | None,
+    micro_type: str,
+    patch_size: int,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+) -> dict[str, float]:
+    context_was_training = context_encoder.training
+    micro_was_training = micro_model.training
+    context_encoder.eval()
+    micro_model.eval()
+
+    total_loss = 0.0
+    metric_accum: dict[str, float] = {}
+    count = 0
+
+    autocast_ctx = (
+        torch.autocast(device_type=device.type, dtype=autocast_dtype)
+        if autocast_dtype
+        else torch.autocast(device_type=device.type, enabled=False)
+    )
+    for batch in val_loader:
+        z_l = batch["z_L"].to(device)
+        z_h = batch["z_H"].to(device)
+        with autocast_ctx:
+            patches = patchify(z_h, patch_size=patch_size)
+            y = projector.project(patches)
+            context = context_encoder(z_l)
+            if micro_type == "categorical":
+                tokens = tokenizer.quantize(y)
+                logits = micro_model(context)
+                loss = categorical_micro_loss(logits, tokens, num_bins=tokenizer.num_bins)
+                metrics = categorical_micro_metrics(logits, tokens, num_bins=tokenizer.num_bins)
+                for k, v in metrics.items():
+                    metric_accum[k] = metric_accum.get(k, 0.0) + v.float().item()
+            else:
+                eps, logabsdet = micro_model(y, context)
+                loss = continuous_micro_nll_loss(eps, logabsdet)
+                metric_accum["logabsdet_mean"] = (
+                    metric_accum.get("logabsdet_mean", 0.0) + logabsdet.float().mean().item()
+                )
+        total_loss += loss.float().item()
+        count += 1
+
+    if context_was_training:
+        context_encoder.train()
+    if micro_was_training:
+        micro_model.train()
+
+    n = max(count, 1)
+    result: dict[str, float] = {"val/loss": total_loss / n}
+    for k, v in metric_accum.items():
+        result[f"val/{k}"] = v / n
+    return result
+
+
 def main() -> None:
     if "LOCAL_RANK" not in os.environ and "_RAMA_RELAUNCHED" not in os.environ:
         _relaunch_with_accelerate(load_config(parse_args().config))
@@ -341,8 +402,19 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     latent_dir = args.latents or config.get("latents", {}).get("output_dir", "data/latents")
-    dataset = CachedMicroLatentDataset(latent_dir)
+    full_dataset = CachedMicroLatentDataset(latent_dir)
     batch_size = args.batch_size or int(training.get("batch_size_per_gpu", 64))
+
+    val_split = float(training.get("val_split", 0.05))
+    val_size = max(1, int(len(full_dataset) * val_split))
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = random_split(
+        full_dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42),
+    )
+    dataset = train_dataset
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -353,6 +425,14 @@ def main() -> None:
     )
     if len(dataloader) == 0:
         raise ValueError("latent dataset is smaller than the per-process batch size; lower batch size or add latents")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
+    )
 
     micro_type = args.micro_type or str(config.get("micro", {}).get("type", config.get("micro_rama_net", {}).get("type", "categorical")))
     if micro_type == "conditional_rq_nsf":
@@ -427,6 +507,7 @@ def main() -> None:
     total_steps = args.max_steps or int(training.get("total_steps", 200000))
     log_every = int(logging_cfg.get("log_every_steps", 100))
     checkpoint_every = int(logging_cfg.get("checkpoint_every_steps", 10000))
+    val_every = int(logging_cfg.get("val_every_steps", log_every * 5))
     fid_every = args.fid_every if args.fid_every is not None else int(evaluation_cfg.get("fid_every_steps", 0))
     fid_num_samples = args.fid_num_samples or int(evaluation_cfg.get("fid_num_samples", 512))
     fid_batch_size = int(evaluation_cfg.get("fid_batch_size", min(batch_size, 32)))
@@ -577,6 +658,32 @@ def main() -> None:
                             "samples/real_grid":  wandb.Image(real_grid),
                         }, step=step)
                     accelerator.print(f"step={step} samples saved to {out_path}")
+                    context_encoder.train()
+                    micro_model.train()
+                accelerator.wait_for_everyone()
+
+            if val_every > 0 and step % val_every == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    val_metrics = evaluate_val_loss(
+                        accelerator.unwrap_model(context_encoder),
+                        accelerator.unwrap_model(micro_model),
+                        val_loader,
+                        projector,
+                        tokenizer,
+                        micro_type,
+                        patch_size=patch_size,
+                        device=accelerator.device,
+                        autocast_dtype=autocast_dtype,
+                    )
+                    accelerator.log(val_metrics, step=step)
+                    val_loss_str = f"val/loss={val_metrics['val/loss']:.6f}"
+                    if micro_type == "categorical":
+                        val_loss_str += (
+                            f" val/token_acc={val_metrics.get('val/token_acc', 0):.4f}"
+                            f" val/token_within_1={val_metrics.get('val/token_within_1', 0):.4f}"
+                        )
+                    accelerator.print(f"step={step} {val_loss_str}")
                     context_encoder.train()
                     micro_model.train()
                 accelerator.wait_for_everyone()
