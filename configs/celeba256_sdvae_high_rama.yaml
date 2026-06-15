@@ -33,11 +33,12 @@ tokenizer:
   percentile: 99.5
 
 context_encoder:
-  architecture: resnet
+  architecture: vit
   in_channels: 4
   context_dim: 256
-  hidden_channels: 128
-  num_layers: 4
+  vit_layers: 6
+  vit_heads: 8
+  vit_mlp_ratio: 4
   dropout: 0.05
   positional_embedding: true
   context_noise_sigma: 0.0
@@ -45,14 +46,11 @@ context_encoder:
 
 micro:
   type: categorical
-  architecture: transformer
+  architecture: mlp
   context_dim: 256
   # patch_dim auto-derived
-  transformer_dim: 512
   hidden_dim: 512
-  num_heads: 8
-  spatial_layers: 4
-  coord_layers: 2
+  num_layers: 4
   dim_emb_dim: 64
   dropout: 0.05
   num_bins: 256
