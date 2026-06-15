@@ -18,6 +18,9 @@ micro_latent:
   patch_size: 4
   # patch_dim auto-derived: C * patch_size^2
 
+output:
+  dir: outputs/micro_rama_high
+
 rama_bases:
   seed: 1234
   # cache_path auto-derived: cache/rama_bases_p{num_patches}_d{patch_dim}.pt

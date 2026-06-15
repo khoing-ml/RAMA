@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the micro latent RAMA model.")
     parser.add_argument("--config", default="configs/debug_6gb_micro.yaml")
     parser.add_argument("--latents", default=None, help="Override latents.output_dir from config.")
-    parser.add_argument("--out", default="outputs/micro_rama")
+    parser.add_argument("--out", default=None, help="Override output.dir from config.")
     parser.add_argument("--resume", default=None, help="Path to a checkpoint to resume from.")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=None, help="Override per-process batch size.")
@@ -242,7 +242,7 @@ def main() -> None:
         log_with="wandb" if tracker == "wandb" else None,
     )
 
-    out_dir = Path(args.out)
+    out_dir = Path(args.out or config.get("output", {}).get("dir", "outputs/micro_rama"))
     if accelerator.is_main_process:
         out_dir.mkdir(parents=True, exist_ok=True)
 
