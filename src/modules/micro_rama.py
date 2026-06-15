@@ -49,6 +49,24 @@ class ContextTransformerBlock(nn.Module):
         return self.ff(x + self.dropout(attn_out))
 
 
+class ResConvBlock(nn.Module):
+    """Pre-norm residual conv block: Norm -> SiLU -> Conv -> Norm -> SiLU -> Conv + skip."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            group_norm(channels),
+            nn.SiLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            group_norm(channels),
+            nn.SiLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
 class ContextEncoder(nn.Module):
     """Encode macro latents into one context vector per residual patch."""
 
@@ -71,8 +89,8 @@ class ContextEncoder(nn.Module):
             raise ValueError("num_layers must be at least 1")
         if vit_layers < 1:
             raise ValueError("vit_layers must be at least 1")
-        architecture = {"cnn": "conv", "tiny_vit": "vit", "transformer": "vit"}.get(architecture, architecture)
-        if architecture not in {"conv", "vit"}:
+        architecture = {"cnn": "conv", "tiny_vit": "vit", "transformer": "vit", "resnet": "resnet"}.get(architecture, architecture)
+        if architecture not in {"conv", "vit", "resnet"}:
             raise ValueError(f"unsupported context encoder architecture: {architecture}")
         self.architecture = architecture
         self.context_dim = context_dim
@@ -95,6 +113,16 @@ class ContextEncoder(nn.Module):
                 ]
             )
             self.output_norm = nn.LayerNorm(context_dim)
+            return
+
+        if architecture == "resnet":
+            self.net = nn.Sequential(
+                nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1),
+                *[ResConvBlock(hidden_channels) for _ in range(num_layers)],
+                group_norm(hidden_channels),
+                nn.SiLU(),
+                nn.Conv2d(hidden_channels, context_dim, kernel_size=1),
+            )
             return
 
         layers: list[nn.Module] = []

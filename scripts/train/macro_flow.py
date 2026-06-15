@@ -439,10 +439,15 @@ def main() -> None:
                             num_steps=s,
                             device=str(accelerator.device),
                         )
-                        imgs = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, sample_z_h)).cpu()
+                        imgs_full = decode_latents(vae, reconstruct_from_decomposition(z_l_fake, sample_z_h)).cpu()
+                        imgs_lf = decode_latents(vae, reconstruct_low_freq(z_l_fake)).cpu()
                         wandb_imgs[f"samples/output_{s}step"] = [
                             wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
-                            for img in imgs
+                            for img in imgs_full
+                        ]
+                        wandb_imgs[f"samples/low_freq_{s}step"] = [
+                            wandb.Image(img.float().clamp(-1, 1).add(1).div(2).permute(1, 2, 0).numpy())
+                            for img in imgs_lf
                         ]
                 wandb.log(wandb_imgs, step=step)
                 if backup is not None:
