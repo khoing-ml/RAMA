@@ -48,12 +48,12 @@ micro:
   architecture: transformer
   context_dim: 256
   # patch_dim auto-derived
-  hidden_dim: 512
+  hidden_dim: 256
   num_layers: 4
-  transformer_dim: 512
-  spatial_layers: 3
+  transformer_dim: 256
+  spatial_layers: 2
   coord_layers: 2
-  num_heads: 8
+  num_heads: 4
   dropout: 0.05
   num_bins: 256
   loss: cross_entropy
@@ -71,9 +71,9 @@ micro_continuous:
   loss: negative_log_likelihood
 
 training:
-  batch_size_per_gpu: 128
+  batch_size_per_gpu: 64
   num_gpus: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   optimizer: AdamW
   learning_rate: 2.0e-4
   betas: [0.9, 0.999]
