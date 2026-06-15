@@ -300,11 +300,12 @@ def _relaunch_with_accelerate(config: dict[str, object]) -> None:
     args = ["accelerate", "launch", f"--num_processes={num_processes}", f"--mixed_precision={precision}"]
     if num_processes > 1:
         args.append("--multi_gpu")
+    os.environ["_RAMA_RELAUNCHED"] = "1"
     os.execvp("accelerate", args + sys.argv)
 
 
 def main() -> None:
-    if "LOCAL_RANK" not in os.environ:
+    if "LOCAL_RANK" not in os.environ and "_RAMA_RELAUNCHED" not in os.environ:
         _relaunch_with_accelerate(load_config(parse_args().config))
     args = parse_args()
     config = resolve_derived_config(load_config(args.config))
