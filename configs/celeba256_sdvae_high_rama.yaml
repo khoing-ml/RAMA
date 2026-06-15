@@ -45,15 +45,12 @@ context_encoder:
 
 micro:
   type: categorical
-  architecture: transformer
+  architecture: mlp
   context_dim: 256
   # patch_dim auto-derived
-  hidden_dim: 256
+  hidden_dim: 512
   num_layers: 4
-  transformer_dim: 256
-  spatial_layers: 2
-  coord_layers: 2
-  num_heads: 4
+  dim_emb_dim: 64
   dropout: 0.05
   num_bins: 256
   loss: cross_entropy
@@ -73,13 +70,14 @@ micro_continuous:
 training:
   batch_size_per_gpu: 128
   num_gpus: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   optimizer: AdamW
   learning_rate: 2.0e-4
   betas: [0.9, 0.999]
   weight_decay: 1.0e-4
   precision: bf16
   total_steps: 200000
+  warmup_steps: 10000  # 5% of total_steps; default is total_steps // 20
   grad_clip: 1.0
 
 logging:
