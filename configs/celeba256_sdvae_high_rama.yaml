@@ -28,7 +28,7 @@ rama_bases:
 tokenizer:
   config_path: cache/rama_tokenizer_config.pt
   num_bins: 256
-  bound: 3.0
+  bound: 4.0
   bound_method: percentile_abs_y
   percentile: 99.5
 
@@ -39,9 +39,9 @@ context_encoder:
   vit_layers: 6
   vit_heads: 8
   vit_mlp_ratio: 4
-  dropout: 0.05
+  dropout: 0.01
   positional_embedding: true
-  context_noise_sigma: 0.0
+  context_noise_sigma: 2
   # grid_size auto-derived from patch_size and residual_shape
 
 micro:
