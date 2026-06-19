@@ -54,8 +54,6 @@ class CategoricalMicroRAMANet(nn.Module):
         architecture: str = "mlp",
         dim_emb_dim: int = 64,
         transformer_dim: int | None = None,
-        spatial_layers: int = 2,
-        coord_layers: int = 2,
         num_heads: int = 4,
         dropout: float = 0.0,
     ) -> None:
@@ -76,21 +74,16 @@ class CategoricalMicroRAMANet(nn.Module):
 
         if architecture == "transformer":
             model_dim = int(transformer_dim or hidden_dim)
+            # Context vector projected to model_dim serves as the CLS token.
             self.context_proj = nn.Linear(context_dim, model_dim)
-            self.spatial_blocks = nn.Sequential(
-                *[SelfAttentionBlock(model_dim, num_heads=num_heads, dropout=dropout) for _ in range(spatial_layers)]
-            )
+            # One learnable embedding per coord dim — analogous to ViT patch positional embeddings.
             self.coord_dim_embed = nn.Embedding(patch_dim, model_dim)
-            self.coord_blocks = nn.Sequential(
-                *[SelfAttentionBlock(model_dim, num_heads=num_heads, dropout=dropout) for _ in range(coord_layers)]
+            # Stack of identical ViT encoder blocks (pre-norm self-attn + FFN).
+            self.vit_blocks = nn.ModuleList(
+                [SelfAttentionBlock(model_dim, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)]
             )
-            self.head = nn.Sequential(
-                nn.LayerNorm(model_dim),
-                nn.Linear(model_dim, hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_dim, num_bins),
-            )
+            self.norm = nn.LayerNorm(model_dim)
+            self.head = nn.Linear(model_dim, num_bins)
             return
 
         self.dim_embed = nn.Embedding(patch_dim, dim_emb_dim)
@@ -118,13 +111,17 @@ class CategoricalMicroRAMANet(nn.Module):
 
         dim_ids = torch.arange(self.patch_dim, device=context.device)
         if self.architecture == "transformer":
-            patch_features = self.context_proj(context)
-            patch_features = self.spatial_blocks(patch_features)
-            coord_emb = self.coord_dim_embed(dim_ids)
-            coord_features = patch_features[:, :, None, :] + coord_emb[None, None, :, :]
-            coord_features = coord_features.reshape(batch * num_patches, self.patch_dim, -1)
-            coord_features = self.coord_blocks(coord_features)
-            logits = self.head(coord_features).reshape(batch, num_patches, self.patch_dim, self.num_bins)
+            # CLS token: projected context, one per patch — (B*P, 1, model_dim)
+            cls = self.context_proj(context).reshape(batch * num_patches, 1, -1)
+            # Coord dim tokens: positional embeddings — (B*P, patch_dim, model_dim)
+            coord_tokens = self.coord_dim_embed(dim_ids).unsqueeze(0).expand(batch * num_patches, -1, -1)
+            # Sequence: [CLS, coord_0, ..., coord_{D-1}]
+            tokens = torch.cat([cls, coord_tokens], dim=1)
+            for block in self.vit_blocks:
+                tokens = block(tokens)
+            tokens = self.norm(tokens)
+            # Drop CLS, predict from coord token outputs
+            logits = self.head(tokens[:, 1:, :]).reshape(batch, num_patches, self.patch_dim, self.num_bins)
             if logits.shape != (batch, num_patches, self.patch_dim, self.num_bins):
                 raise RuntimeError(f"unexpected logits shape {tuple(logits.shape)}")
             return logits
@@ -148,8 +145,6 @@ def build_categorical_micro_rama_net(config: dict[str, object], num_bins: int | 
         architecture=str(config.get("architecture", "mlp")),
         dim_emb_dim=int(config.get("dim_emb_dim", 64)),
         transformer_dim=int(config.get("transformer_dim", config.get("hidden_dim", 512))),
-        spatial_layers=int(config.get("spatial_layers", 2)),
-        coord_layers=int(config.get("coord_layers", 2)),
         num_heads=int(config.get("num_heads", 4)),
         dropout=float(config.get("dropout", 0.0)),
     )
