@@ -119,7 +119,7 @@ def main() -> None:
     if args.context_mode == "trained":
         enc_cfg = dict(config.get("context_encoder", {}))
         enc_cfg["grid_size"] = [H_res // patch_size, W_res // patch_size]
-        enc_cfg["patch_size"] = patch_size
+        enc_cfg["patch_size"] = patch_size // 2  # z_L is 2× downsampled from z_H
         context_encoder = build_context_encoder(enc_cfg).to(args.device)
         opt_params = list(context_encoder.parameters()) + list(micro_model.parameters())
         print(f"[mode=trained] training encoder + micro jointly")
