@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check that categorical micro RAMA can overfit a tiny latent set.")
     parser.add_argument("--config", default="configs/debug_6gb_micro.yaml")
     parser.add_argument("--latents", default=None)
-    parser.add_argument("--bases", default="cache/rama_bases_p256_d16.pt")
+    parser.add_argument("--bases", default=None, help="path to RAMA bases .pt file; auto-detected from cache/ if omitted")
     parser.add_argument("--tokenizer-config", default="cache/rama_tokenizer_config.pt")
     parser.add_argument("--num-images", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -90,21 +90,31 @@ def main() -> None:
         if tokenizer_config.exists()
         else RAMATokenizer(num_bins=int(config.get("tokenizer", {}).get("num_bins", 256)))
     )
-    bases = torch.load(args.bases, map_location="cpu").float()
-    projector = RAMAProjector(bases).to(args.device)
-    projector.requires_grad_(False)
-
     context_dim = int(config.get("context_encoder", {}).get("context_dim", 256))
     ml_cfg = config.get("micro_latent", {})
     patch_size = int(ml_cfg.get("patch_size", 2))
     residual_shape = ml_cfg.get("residual_shape", [4, 32, 32])
-    C = int(residual_shape[0])
+    C, H_res, W_res = int(residual_shape[0]), int(residual_shape[1]), int(residual_shape[2])
     patch_dim = C * patch_size * patch_size
+    num_patches = (H_res // patch_size) * (W_res // patch_size)
 
-    micro_model = build_categorical_micro_rama_net(
-        config.get("micro", config.get("micro_rama_net", {})),
-        num_bins=tokenizer.num_bins,
-    ).to(args.device)
+    bases_path = Path(args.bases) if args.bases else None
+    if bases_path is None:
+        candidates = sorted(Path("cache").glob("rama_bases_*.pt")) if Path("cache").exists() else []
+        bases_path = candidates[0] if candidates else None
+    if bases_path and bases_path.exists():
+        print(f"Loading bases from {bases_path}")
+        bases = torch.load(bases_path, map_location="cpu").float()
+    else:
+        from src.modules.rama import make_orthogonal_bases
+        print(f"[warn] no bases file found — generating random orthogonal bases (patch_dim={patch_dim}, num_patches={num_patches})")
+        bases = make_orthogonal_bases(num_patches, patch_dim)
+    projector = RAMAProjector(bases).to(args.device)
+    projector.requires_grad_(False)
+
+    micro_cfg = dict(config.get("micro", config.get("micro_rama_net", {})))
+    micro_cfg["patch_dim"] = patch_dim
+    micro_model = build_categorical_micro_rama_net(micro_cfg, num_bins=tokenizer.num_bins).to(args.device)
 
     if args.context_mode == "trained":
         context_encoder = build_context_encoder(config.get("context_encoder", {})).to(args.device)
