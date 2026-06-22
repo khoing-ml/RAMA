@@ -52,11 +52,35 @@ def load_config(path: str | Path) -> dict[str, object]:
         return yaml.safe_load(handle)
 
 
+class _SyntheticMicroDataset(torch.utils.data.Dataset):
+    """Random z_L / z_H tensors for smoke-testing without real data."""
+
+    def __init__(self, num_images: int, residual_shape: list[int]) -> None:
+        C, H, W = int(residual_shape[0]), int(residual_shape[1]), int(residual_shape[2])
+        self.z_h = torch.randn(num_images, C, H, W)
+        self.z_l = torch.randn(num_images, C, H // 2, W // 2)
+
+    def __len__(self) -> int:
+        return len(self.z_h)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {"z_L": self.z_l[index], "z_H": self.z_h[index]}
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     latent_dir = args.latents or config.get("latents", {}).get("output_dir", "data/latents")
-    dataset = CachedMicroLatentDataset(latent_dir)
+
+    residual_shape = config.get("micro_latent", {}).get("residual_shape", [4, 32, 32])
+    try:
+        dataset = CachedMicroLatentDataset(latent_dir)
+        print(f"Loaded {len(dataset)} latents from {latent_dir}")
+    except FileNotFoundError:
+        print(f"[warn] no latents found at {latent_dir} — using synthetic random tensors")
+        print(f"       (results are only meaningful for diagnosing model capacity, not data fit)")
+        dataset = _SyntheticMicroDataset(args.num_images, residual_shape)
+
     subset = Subset(dataset, list(range(min(args.num_images, len(dataset)))))
     dataloader = DataLoader(subset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
