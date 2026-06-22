@@ -75,7 +75,7 @@ training:
   optimizer: AdamW
   learning_rate: 5e-4
   betas: [0.9, 0.999]
-  weight_decay: 1.0e-4
+  weight_decay: 1.0e-4  
   precision: bf16
   total_steps: 100000
   warmup_steps: 2000  # 5% of total_steps; default is total_steps // 20
