@@ -33,6 +33,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=2.0e-4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--context-mode",
+        choices=["trained", "oracle", "zero"],
+        default="trained",
+        help=(
+            "trained: normal encoder+micro joint training (default). "
+            "oracle: bypass encoder — context is a fixed linear projection of z_H patches "
+            "(upper bound; if micro can't overfit here, micro is the bottleneck). "
+            "zero: feed all-zeros context — no encoder signal at all (lower bound baseline)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -59,17 +70,40 @@ def main() -> None:
     projector = RAMAProjector(bases).to(args.device)
     projector.requires_grad_(False)
 
-    context_encoder = build_context_encoder(config.get("context_encoder", {})).to(args.device)
+    context_dim = int(config.get("context_encoder", {}).get("context_dim", 256))
+    ml_cfg = config.get("micro_latent", {})
+    patch_size = int(ml_cfg.get("patch_size", 2))
+    residual_shape = ml_cfg.get("residual_shape", [4, 32, 32])
+    C = int(residual_shape[0])
+    patch_dim = C * patch_size * patch_size
+
     micro_model = build_categorical_micro_rama_net(
         config.get("micro", config.get("micro_rama_net", {})),
         num_bins=tokenizer.num_bins,
     ).to(args.device)
-    optimizer = torch.optim.AdamW(
-        list(context_encoder.parameters()) + list(micro_model.parameters()),
-        lr=args.lr,
-    )
 
-    patch_size = int(config.get("rama", config.get("micro_latent", {})).get("patch_size", 2))
+    if args.context_mode == "trained":
+        context_encoder = build_context_encoder(config.get("context_encoder", {})).to(args.device)
+        opt_params = list(context_encoder.parameters()) + list(micro_model.parameters())
+        print(f"[mode=trained] training encoder + micro jointly")
+    elif args.context_mode == "oracle":
+        # Fixed linear projection of the actual patches → context.
+        # Encoder is bypassed; micro sees a perfect (but simple) context derived from z_H.
+        # If micro can't overfit here, it's underpowered or the task is too hard regardless.
+        oracle_proj = torch.nn.Linear(patch_dim, context_dim, bias=False).to(args.device)
+        oracle_proj.requires_grad_(False)  # fixed — not trained
+        context_encoder = None
+        opt_params = list(micro_model.parameters())
+        print(f"[mode=oracle] context = fixed linear projection of z_H patches (encoder bypassed)")
+        print(f"  → if micro fails to overfit here, micro model is the bottleneck")
+        print(f"  → if micro overfits here but not in [trained] mode, encoder is the bottleneck")
+    else:  # zero
+        context_encoder = None
+        opt_params = list(micro_model.parameters())
+        print(f"[mode=zero] context = all zeros (lower bound — no encoder signal)")
+
+    optimizer = torch.optim.AdamW(opt_params, lr=args.lr)
+
     iterator = iter(dataloader)
     for step in range(1, args.steps + 1):
         try:
@@ -81,7 +115,18 @@ def main() -> None:
         z_h = batch["z_H"].to(args.device).detach()
         patches = patchify(z_h, patch_size=patch_size)
         tokens = tokenizer.quantize(projector.project(patches))
-        logits = micro_model(context_encoder(z_l))
+
+        if args.context_mode == "trained":
+            ctx = context_encoder(z_l)
+        elif args.context_mode == "oracle":
+            with torch.no_grad():
+                # patches: [B, P, patch_dim] → oracle_proj → [B, P, context_dim]
+                ctx = oracle_proj(patches.float())
+        else:  # zero
+            B, P = patches.shape[:2]
+            ctx = torch.zeros(B, P, context_dim, device=args.device)
+
+        logits = micro_model(ctx)
         loss = categorical_micro_loss(logits, tokens, tokenizer.num_bins)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

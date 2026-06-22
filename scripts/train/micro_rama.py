@@ -4,6 +4,7 @@ import argparse
 import copy
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import math
@@ -88,8 +89,8 @@ def resolve_derived_config(config: dict[str, object]) -> dict[str, object]:
     return config
 
 
-def checkpoint_path(out_dir: Path, step: int) -> Path:
-    return out_dir / "checkpoints" / f"step_{step:08d}.pt"
+def checkpoint_path(out_dir: Path, run_id: str, step: int) -> Path:
+    return out_dir / "checkpoints" / run_id / f"step_{step:08d}.pt"
 
 
 def resolve_vae_checkpoint(vae_cfg: dict[str, object]) -> str:
@@ -411,8 +412,12 @@ def main() -> None:
     )
 
     out_dir = Path(args.out or config.get("output", {}).get("dir", "outputs/micro_rama"))
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     if accelerator.is_main_process:
-        out_dir.mkdir(parents=True, exist_ok=True)
+        run_ckpt_dir = out_dir / "checkpoints" / run_id
+        run_ckpt_dir.mkdir(parents=True, exist_ok=True)
+        with open(run_ckpt_dir / "config.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
     latent_dir = args.latents or config.get("latents", {}).get("output_dir", "data/latents")
     full_dataset = CachedMicroLatentDataset(latent_dir)
@@ -744,7 +749,7 @@ def main() -> None:
 
             if accelerator.is_main_process and step % checkpoint_every == 0:
                 save_checkpoint(
-                    checkpoint_path(out_dir, step),
+                    checkpoint_path(out_dir, run_id, step),
                     step,
                     accelerator.unwrap_model(context_encoder),
                     accelerator.unwrap_model(micro_model),
@@ -756,7 +761,7 @@ def main() -> None:
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         save_checkpoint(
-            checkpoint_path(out_dir, step),
+            checkpoint_path(out_dir, run_id, step),
             step,
             accelerator.unwrap_model(context_encoder),
             accelerator.unwrap_model(micro_model),
