@@ -117,7 +117,10 @@ def main() -> None:
     micro_model = build_categorical_micro_rama_net(micro_cfg, num_bins=tokenizer.num_bins).to(args.device)
 
     if args.context_mode == "trained":
-        context_encoder = build_context_encoder(config.get("context_encoder", {})).to(args.device)
+        enc_cfg = dict(config.get("context_encoder", {}))
+        enc_cfg["grid_size"] = [H_res // patch_size, W_res // patch_size]
+        enc_cfg["patch_size"] = patch_size
+        context_encoder = build_context_encoder(enc_cfg).to(args.device)
         opt_params = list(context_encoder.parameters()) + list(micro_model.parameters())
         print(f"[mode=trained] training encoder + micro jointly")
     elif args.context_mode == "oracle":
