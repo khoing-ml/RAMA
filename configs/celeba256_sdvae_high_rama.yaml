@@ -27,7 +27,7 @@ rama_bases:
 
 tokenizer:
   config_path: cache/rama_tokenizer_config.pt
-  num_bins: 256
+  num_bins: 64
   bound: 4.0
   bound_method: percentile_abs_y
   percentile: 99.5
@@ -73,7 +73,7 @@ training:
   num_gpus: 1
   gradient_accumulation_steps: 1
   optimizer: AdamW
-  learning_rate: 5e-4
+  learning_rate: 7e-4
   betas: [0.9, 0.999]
   weight_decay: 1.0e-4  
   precision: bf16
