@@ -53,7 +53,7 @@ micro:
   num_layers: 4
   dim_emb_dim: 64
   dropout: 0.05
-  num_bins: 256
+  num_bins: 64
   loss: cross_entropy
 
 micro_continuous:
