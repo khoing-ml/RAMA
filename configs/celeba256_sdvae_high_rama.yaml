@@ -33,16 +33,16 @@ tokenizer:
   percentile: 99.5
 
 context_encoder:
-  architecture: vit
+  architecture: dit
   in_channels: 4
   context_dim: 256
-  vit_layers: 6
-  vit_heads: 8
-  vit_mlp_ratio: 4
-  dropout: 0.05
-  positional_embedding: true
+  num_layers: 6
+  num_heads: 8
+  mlp_ratio: 4
+  dropout: 0
   context_noise_sigma: 0.05
   # grid_size auto-derived from patch_size and residual_shape
+  # positional_embedding unused: dit uses 2D RoPE instead
 
 micro:
   type: categorical
@@ -52,7 +52,7 @@ micro:
   hidden_dim: 512
   num_layers: 4
   dim_emb_dim: 64
-  dropout: 0.05
+  dropout: 0
   num_bins: 64
   loss: cross_entropy
 

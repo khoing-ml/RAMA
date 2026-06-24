@@ -7,21 +7,21 @@ latents:
 micro_latent:
   residual_shape: [4, 32, 32]
   patch_size: 4
-  patch_grid: [16, 16]
-  num_patches: 256
-  patch_dim: 16
+  patch_grid: [8, 8]
+  num_patches: 64
+  patch_dim: 64
 
 rama_bases:
-  cache_path: cache/rama_bases_p256_d16.pt
-  num_patches: 256
-  patch_dim: 16
+  cache_path: cache/rama_bases_p64_d64.pt
+  num_patches: 64
+  patch_dim: 64
   seed: 1234
 
 rama:
-  bases_path: cache/rama_bases_p256_d16.pt
+  bases_path: cache/rama_bases_p64_d64.pt
   patch_size: 4
-  num_patches: 256
-  patch_dim: 16
+  num_patches: 64
+  patch_dim: 64
 
 tokenizer:
   config_path: cache/rama_tokenizer_config.pt
@@ -36,9 +36,8 @@ context_encoder:
   context_dim: 64
   hidden_channels: 64
   num_layers: 2
-  vit_layers: 2
-  vit_heads: 4
-  vit_mlp_ratio: 4
+  num_heads: 4
+  mlp_ratio: 4
   dropout: 0.0
   positional_embedding: true
   grid_size: [16, 16]
@@ -47,7 +46,7 @@ context_encoder:
 micro:
   type: categorical
   context_dim: 64
-  patch_dim: 16
+  patch_dim: 64
   dim_emb_dim: 32
   hidden_dim: 128
   num_layers: 2
@@ -57,7 +56,7 @@ micro:
 micro_rama_net:
   type: categorical
   context_dim: 64
-  patch_dim: 16
+  patch_dim: 64
   dim_emb_dim: 32
   hidden_dim: 128
   num_layers: 2
@@ -67,7 +66,7 @@ micro_continuous:
   type: nflows
   enabled: false
   context_dim: 64
-  patch_dim: 16
+  patch_dim: 64
   dim_emb_dim: 32
   hidden_dim: 128
   num_layers: 2

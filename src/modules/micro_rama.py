@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import math
+from typing import Tuple
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from src.macro.unet import group_norm
@@ -10,6 +14,105 @@ try:
     from nflows.transforms.splines import unconstrained_rational_quadratic_spline
 except ImportError:  # pragma: no cover - exercised only when optional dependency is missing.
     unconstrained_rational_quadratic_spline = None
+
+
+# ---------------------------------------------------------------------------
+# DDT-style DiT context encoder components (RMSNorm, 2D RoPE, gated FFN)
+# ---------------------------------------------------------------------------
+
+def _precompute_freqs_cis_2d(head_dim: int, height: int, width: int, theta: float = 10000.0, scale: float = 16.0) -> torch.Tensor:
+    x_pos = torch.linspace(0, scale, width)
+    y_pos = torch.linspace(0, scale, height)
+    y_pos, x_pos = torch.meshgrid(y_pos, x_pos, indexing="ij")
+    y_pos = y_pos.reshape(-1)
+    x_pos = x_pos.reshape(-1)
+    freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 4)[: (head_dim // 4)].float() / head_dim))
+    x_freqs = torch.outer(x_pos, freqs).float()
+    y_freqs = torch.outer(y_pos, freqs).float()
+    x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)
+    y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)
+    freqs_cis = torch.cat([x_cis.unsqueeze(-1), y_cis.unsqueeze(-1)], dim=-1)
+    return freqs_cis.reshape(height * width, -1)  # [N, head_dim//2] complex
+
+
+def _apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    freqs_cis = freqs_cis[None, :, None, :]  # [1, N, 1, head_dim//2] complex
+    q_ = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
+    k_ = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
+    q_out = torch.view_as_real(q_ * freqs_cis).flatten(3)
+    k_out = torch.view_as_real(k_ * freqs_cis).flatten(3)
+    return q_out.type_as(q), k_out.type_as(k)
+
+
+class DiTContextRMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.float()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return self.weight * x.to(dtype)
+
+
+class DiTContextAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int = 8) -> None:
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim={dim} must be divisible by num_heads={num_heads}")
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.q_norm = DiTContextRMSNorm(self.head_dim)
+        self.k_norm = DiTContextRMSNorm(self.head_dim)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 1, 3, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # [B, N, H, Hc]
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        q, k = _apply_rotary_emb(q, k, freqs_cis)
+        q = q.transpose(1, 2)   # [B, H, N, Hc]
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(B, N, C)
+        return self.proj(x)
+
+
+class DiTContextFeedForward(nn.Module):
+    def __init__(self, dim: int, mlp_ratio: int = 4) -> None:
+        super().__init__()
+        hidden_dim = int(2 * dim * mlp_ratio / 3)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class DiTContextBlock(nn.Module):
+    """DDT-style pre-norm transformer block with RMSNorm, 2D RoPE, and SiLU-gated FFN."""
+
+    def __init__(self, dim: int, num_heads: int = 8, mlp_ratio: int = 4) -> None:
+        super().__init__()
+        self.norm1 = DiTContextRMSNorm(dim)
+        self.attn = DiTContextAttention(dim, num_heads=num_heads)
+        self.norm2 = DiTContextRMSNorm(dim)
+        self.ff = DiTContextFeedForward(dim, mlp_ratio=mlp_ratio)
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), freqs_cis)
+        x = x + self.ff(self.norm2(x))
+        return x
+
+
+# ---------------------------------------------------------------------------
 
 
 class ContextFeedForwardBlock(nn.Module):
@@ -80,27 +183,45 @@ class ContextEncoder(nn.Module):
         use_position_embedding: bool = True,
         grid_size: tuple[int, int] = (16, 16),
         architecture: str = "conv",
-        vit_layers: int = 4,
-        vit_heads: int = 4,
-        vit_mlp_ratio: int = 4,
+        num_heads: int = 4,
+        mlp_ratio: int = 4,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
-        if vit_layers < 1:
-            raise ValueError("vit_layers must be at least 1")
         if patch_size < 1:
             raise ValueError("patch_size must be at least 1")
-        architecture = {"cnn": "conv", "tiny_vit": "vit", "transformer": "vit", "resnet": "resnet"}.get(architecture, architecture)
-        if architecture not in {"conv", "vit", "resnet"}:
+        architecture = {
+            "cnn": "conv", "tiny_vit": "vit", "transformer": "vit", "resnet": "resnet",
+            "diffusion_transformer": "dit",
+        }.get(architecture, architecture)
+        if architecture not in {"conv", "vit", "resnet", "dit"}:
             raise ValueError(f"unsupported context encoder architecture: {architecture}")
         self.architecture = architecture
         self.context_dim = context_dim
         self.grid_size = grid_size
+        # DiT uses 2D RoPE; other architectures use learned positional embeddings
         self.position_embedding = (
-            nn.Parameter(torch.zeros(1, grid_size[0] * grid_size[1], context_dim)) if use_position_embedding else None
+            nn.Parameter(torch.zeros(1, grid_size[0] * grid_size[1], context_dim))
+            if use_position_embedding and architecture != "dit"
+            else None
         )
+
+        if architecture == "dit":
+            if num_heads <= 0 or context_dim % num_heads != 0:
+                raise ValueError(f"context_dim={context_dim} must be divisible by num_heads={num_heads}")
+            self._patch_size = patch_size
+            self.input_proj = nn.Linear(in_channels * patch_size * patch_size, context_dim)
+            self.blocks = nn.ModuleList([
+                DiTContextBlock(context_dim, num_heads=num_heads, mlp_ratio=mlp_ratio)
+                for _ in range(num_layers)
+            ])
+            self.output_norm = DiTContextRMSNorm(context_dim)
+            head_dim = context_dim // num_heads
+            freqs_cis = _precompute_freqs_cis_2d(head_dim, grid_size[0], grid_size[1])
+            self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+            return
 
         if architecture == "vit":
             # patch_size > 1 merges z_L pixels into fewer, larger tokens
@@ -109,11 +230,11 @@ class ContextEncoder(nn.Module):
                 *[
                     ContextTransformerBlock(
                         context_dim,
-                        num_heads=vit_heads,
-                        mlp_ratio=vit_mlp_ratio,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
                         dropout=dropout,
                     )
-                    for _ in range(vit_layers)
+                    for _ in range(num_layers)
                 ]
             )
             self.output_norm = nn.LayerNorm(context_dim)
@@ -151,6 +272,14 @@ class ContextEncoder(nn.Module):
     def forward(self, z_l: torch.Tensor) -> torch.Tensor:
         if z_l.ndim != 4:
             raise ValueError(f"expected z_L shape [B, C, H, W], got {tuple(z_l.shape)}")
+        if self.architecture == "dit":
+            B, C, H, W = z_l.shape
+            # patchify → embed → DiT blocks with 2D RoPE
+            context = F.unfold(z_l, kernel_size=self._patch_size, stride=self._patch_size).transpose(1, 2)
+            context = self.input_proj(context)
+            for block in self.blocks:
+                context = block(context, self.freqs_cis)
+            return self.output_norm(context)
         if self.architecture == "vit":
             context = self.input_proj(z_l).flatten(2).transpose(1, 2)
         else:
@@ -263,18 +392,21 @@ def micro_nll_loss(eps: torch.Tensor, logabsdet: torch.Tensor) -> torch.Tensor:
 
 def build_context_encoder(config: dict[str, object]) -> ContextEncoder:
     grid = tuple(config.get("grid_size", [16, 16]))
+    # vit_layers/vit_heads/vit_mlp_ratio are old names kept for backwards compat
+    num_layers = int(config.get("num_layers", config.get("vit_layers", 4)))
+    num_heads = int(config.get("num_heads", config.get("vit_heads", 4)))
+    mlp_ratio = int(config.get("mlp_ratio", config.get("vit_mlp_ratio", 4)))
     return ContextEncoder(
         in_channels=int(config.get("in_channels", 4)),
         context_dim=int(config.get("context_dim", 256)),
         hidden_channels=int(config.get("hidden_channels", 128)),
-        num_layers=int(config.get("num_layers", 3)),
+        num_layers=num_layers,
         patch_size=int(config.get("patch_size", 1)),
         use_position_embedding=bool(config.get("positional_embedding", True)),
         grid_size=(int(grid[0]), int(grid[1])),
         architecture=str(config.get("architecture", "conv")),
-        vit_layers=int(config.get("vit_layers", 4)),
-        vit_heads=int(config.get("vit_heads", 4)),
-        vit_mlp_ratio=int(config.get("vit_mlp_ratio", 4)),
+        num_heads=num_heads,
+        mlp_ratio=mlp_ratio,
         dropout=float(config.get("dropout", 0.0)),
     )
 
