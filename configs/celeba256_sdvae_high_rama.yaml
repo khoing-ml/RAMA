@@ -36,8 +36,8 @@ context_encoder:
   architecture: dit
   in_channels: 4
   context_dim: 256
-  num_layers: 6
-  num_heads: 8
+  num_layers: 10
+  num_heads: 4  
   mlp_ratio: 4
   dropout: 0
   context_noise_sigma: 0.05
@@ -73,7 +73,7 @@ training:
   num_gpus: 1
   gradient_accumulation_steps: 1
   optimizer: AdamW
-  learning_rate: 7e-4
+  learning_rate: 5e-4
   betas: [0.9, 0.999]
   weight_decay: 1.0e-4  
   precision: bf16
@@ -100,3 +100,4 @@ evaluation:
   fid_stats: /content/drive/MyDrive/RAMA/fid_stats_celeba256_5k.pt
   temperature: 1.0
   use_argmax: false
+
