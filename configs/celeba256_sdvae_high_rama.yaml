@@ -26,11 +26,11 @@ rama_bases:
   # cache_path auto-derived: cache/rama_bases_p{num_patches}_d{patch_dim}.pt
 
 tokenizer:
-  # calibrated for this config's patch_size=2/num_bins=128 (quantile-binned) via
+  # calibrated for this config's patch_size=2/num_bins=1024 (quantile-binned) via
   # scripts/dev/estimate_quant_bound.py; num_bins/bound below are only the
   # fallback used if config_path is missing.
-  config_path: cache/rama_tokenizer_config_celeba256_sdvae_high_rama_p2_b128.pt
-  num_bins: 128
+  config_path: cache/rama_tokenizer_config_celeba256_sdvae_high_rama_p2_b1024.pt
+  num_bins: 1024
   bound: 1.620785
   bound_method: percentile_abs_y
   percentile: 99.5
@@ -56,7 +56,7 @@ micro:
   num_layers: 4
   dim_emb_dim: 64
   dropout: 0
-  num_bins: 128
+  num_bins: 1024
   loss: cross_entropy
 
 micro_continuous:
