@@ -163,7 +163,7 @@ def main() -> None:
     micro_type = resolve_micro_type(micro_config, args.micro_type)
     tokenizer = None
     if micro_type == "categorical":
-        tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config))
+        tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config)).to(args.device)
     context_encoder = build_context_encoder(micro_config.get("context_encoder", {})).to(args.device)
     if micro_type == "categorical":
         micro_cfg = micro_config.get("micro", micro_config.get("micro_rama_net", {}))

@@ -345,7 +345,7 @@ def main() -> None:
         build_tokenizer_from_config(load_tokenizer_config(str(tokenizer_path)))
         if tokenizer_path.exists()
         else RAMATokenizer(num_bins=num_bins)
-    )
+    ).to(args.device)
 
     # Load data
     z_l, z_h = _get_latents(args, config, args.device)

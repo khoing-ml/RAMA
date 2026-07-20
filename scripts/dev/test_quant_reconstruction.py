@@ -78,7 +78,7 @@ def main() -> None:
         build_tokenizer_from_config(load_tokenizer_config(str(tokenizer_config)))
         if tokenizer_config.exists()
         else RAMATokenizer()
-    )
+    ).to(args.device)
 
     z = z.to(args.device)
     decomposition = decompose_latent(z)

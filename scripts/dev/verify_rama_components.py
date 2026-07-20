@@ -56,7 +56,7 @@ def main() -> None:
         build_tokenizer_from_config(load_tokenizer_config(str(tokenizer_config)))
         if tokenizer_config.exists()
         else RAMATokenizer()
-    )
+    ).to(args.device)
     y = projector.project(patches)
     tokens = tokenizer.quantize(y)
     assert tokens.dtype == torch.long

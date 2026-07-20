@@ -15,7 +15,7 @@ vae:
 
 micro_latent:
   residual_shape: [4, 32, 32]
-  patch_size: 4
+  patch_size: 2
   # patch_dim auto-derived: C * patch_size^2
 
 output:
@@ -26,9 +26,12 @@ rama_bases:
   # cache_path auto-derived: cache/rama_bases_p{num_patches}_d{patch_dim}.pt
 
 tokenizer:
-  config_path: cache/rama_tokenizer_config.pt
-  num_bins: 64
-  bound: 4.0
+  # calibrated for this config's patch_size=2/num_bins=128 (quantile-binned) via
+  # scripts/dev/estimate_quant_bound.py; num_bins/bound below are only the
+  # fallback used if config_path is missing.
+  config_path: cache/rama_tokenizer_config_celeba256_sdvae_high_rama_p2_b128.pt
+  num_bins: 128
+  bound: 1.620785
   bound_method: percentile_abs_y
   percentile: 99.5
 
@@ -36,8 +39,8 @@ context_encoder:
   architecture: dit
   in_channels: 4
   context_dim: 256
-  num_layers: 10
-  num_heads: 4  
+  num_layers: 6
+  num_heads: 8  
   mlp_ratio: 4
   dropout: 0
   context_noise_sigma: 0.05
@@ -53,7 +56,7 @@ micro:
   num_layers: 4
   dim_emb_dim: 64
   dropout: 0
-  num_bins: 64
+  num_bins: 128
   loss: cross_entropy
 
 micro_continuous:

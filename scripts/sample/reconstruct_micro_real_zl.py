@@ -72,7 +72,7 @@ def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.micro_checkpoint, map_location="cpu")
     config = load_config(args.config, checkpoint)
-    tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config))
+    tokenizer = build_tokenizer_from_config(load_tokenizer_config(args.tokenizer_config)).to(args.device)
 
     context_encoder = build_context_encoder(config.get("context_encoder", {})).to(args.device)
     micro_model = build_categorical_micro_rama_net(

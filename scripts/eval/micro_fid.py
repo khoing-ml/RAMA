@@ -65,7 +65,7 @@ def main() -> None:
     tokenizer = None
     if micro_type == "categorical":
         tok_path = args.tokenizer_config or str(ckpt_config.get("tokenizer", {}).get("config_path", "cache/rama_tokenizer_config.pt"))
-        tokenizer = build_tokenizer_from_config(load_tokenizer_config(tok_path))
+        tokenizer = build_tokenizer_from_config(load_tokenizer_config(tok_path)).to(device)
 
     print(f"Loading micro models (type={micro_type})...")
     context_encoder, micro_model, config = load_micro_models(args.checkpoint, micro_type, tokenizer, device)

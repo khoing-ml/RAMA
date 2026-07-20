@@ -459,7 +459,11 @@ def main() -> None:
         raise ValueError(f"unsupported micro type: {micro_type}")
     config["micro_type"] = micro_type
 
-    tokenizer = load_tokenizer(tokenizer_cfg, args.tokenizer_config) if micro_type == "categorical" else None
+    tokenizer = (
+        load_tokenizer(tokenizer_cfg, args.tokenizer_config).to(accelerator.device)
+        if micro_type == "categorical"
+        else None
+    )
     patch_size = int(micro_latent_cfg.get("patch_size", 2))
     context_encoder_cfg = dict(config.get("context_encoder", {}))
     # CE patch_size is always micro patch_size // 2 because z_L is 2x downsampled from z_H

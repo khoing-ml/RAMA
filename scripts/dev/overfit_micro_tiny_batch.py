@@ -89,7 +89,7 @@ def main() -> None:
         build_tokenizer_from_config(load_tokenizer_config(str(tokenizer_config)))
         if tokenizer_config.exists()
         else RAMATokenizer(num_bins=int(config.get("tokenizer", {}).get("num_bins", 256)))
-    )
+    ).to(args.device)
     context_dim = int(config.get("context_encoder", {}).get("context_dim", 256))
     ml_cfg = config.get("micro_latent", {})
     patch_size = int(ml_cfg.get("patch_size", 2))
